@@ -307,3 +307,32 @@ how-to guide are deferred to Day 6. Until then, this build log is where decision
   ever reinstalled through winget, run `ngrok update` again.
 - The authtoken (`ngrok config add-authtoken …`, saved in `%LOCALAPPDATA%\ngrok\ngrok.yml`) is
   added by the user, never by tooling, and is never committed.
+
+### 9. ✅ Day-1 exit check: backend + ngrok tunnel + simulator (2026-11-23, ~17:16 IST)
+
+Setup, exactly as in the README: `npm run backend:dev`, `npm run tunnel` (ngrok 3.39.13, free
+plan, region India), `npm run plugin:dev` (`VITE_BACKEND_URL` = the ngrok URL from
+`plugin/.env.local`), `npm run sim:auto`.
+
+- ngrok request log: `GET /ws 101 Switching Protocols`, `OPTIONS /healthz 200`, `GET /healthz 200`.
+  The simulator's WebView WebSocket **upgraded through ngrok without hitting the warning page**,
+  so no Cloudflare tunnel is needed.
+- Glasses framebuffer (6 captures, ~8 s apart): ETH mark 1,727.2 → 1,726.1 → 1,727.2, clock
+  17:17 → 17:18. Companion page: chip LIVE, health "HL live · telegram disabled · 1 client(s)".
+- Swipe down injected via the automation API → `intent next` → backend `ack` through the tunnel.
+
+**ngrok free-tier warning page, measured.** Requests use an Android Chrome User-Agent:
+
+| Request through `https://caucus-strategic-endorse.ngrok-free.dev` | Result |
+|---|---|
+| `wss://…/ws?code=…`, no skip header (browsers can't send one) | **101**, frames stream normally |
+| `GET /healthz`, `Accept: text/html`, **no** `ngrok-skip-browser-warning` | 200 **`text/html`** (warning page) |
+| `GET /healthz` **with** `ngrok-skip-browser-warning: true` | 200 `application/json` |
+
+So the header on every `fetch` (`plugin/src/api.ts`) is required, and the WebSocket doesn't need
+it. If a future ngrok change starts intercepting WS upgrades, the plugin will show "Backend
+unreachable" and the ngrok log will show a non-101 on `/ws`. The fallback is a Cloudflare named
+tunnel: change the host in `plugin/app.json` (both entries), `plugin/.env.local` and the `tunnel` script.
+
+Note: through ngrok, the backend logs the client's **public IP** in uvicorn access lines. That's
+expected and local only, but don't paste those logs publicly.
