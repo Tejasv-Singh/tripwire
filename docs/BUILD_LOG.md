@@ -253,3 +253,38 @@ No `make` on Windows, so the monorepo commands are npm scripts:
 | `npm run sim` / `sim:auto` | simulator → `http://localhost:5173` (`:auto` adds automation API on `:9898`) |
 | `npm run tunnel` | `ngrok http --url=caucus-strategic-endorse.ngrok-free.dev 8000` |
 | `npm test` / `npm run check` | all tests / tests + ruff + mypy + tsc |
+
+### 6. Local end-to-end check (backend + Vite + simulator, no tunnel)
+
+Run: backend on `127.0.0.1:8000`, Vite with `VITE_BACKEND_URL=http://127.0.0.1:8000` (an
+environment variable overrides `.env.local`), simulator with `--automation-port 9898`.
+
+- **First attempt: blank display.** The simulator loaded `http://localhost:5173` before Vite was
+  listening and showed "localhost refused to connect". **Start Vite first and wait for "ready"**
+  (now in the README run order and troubleshooting table). The simulator doesn't retry.
+- **Second attempt:** the console showed `Bridge initialized`, `[tripwire] ws open`,
+  `hello: protocol v1, testnet`, and the glasses framebuffer (`GET /api/screenshot/glasses`,
+  an RGBA PNG composited onto black to view it) showed:
+  ```
+  TRIPWIRE            TESTNET      17:00
+  ETH-PERP  1,724.9  mark
+  No account set (price only)
+  ----------------------------------------
+  tap: actions  swipe: next  2x: exit
+  ```
+- **Live updates:** six framebuffer captures about 8 s apart read ETH mark 1,725.7 → 1,726.7 →
+  1,725.7 → 1,725.2 → 1,724.6 → 1,724.2, and the clock went 17:00 → 17:01. ✅
+- **Input:** `POST /api/input` with `down`, `up` and `click` gave `intent next`, `intent prev` and
+  `intent actions` in the plugin log. The backend logged all three and wrote them to `intent_log`,
+  and each was acked. So the simulator's **down = `SCROLL_BOTTOM_EVENT`**, which confirms the
+  swipe mapping (still to be checked on hardware).
+- Fixed: the ack log line printed `1/0` when there were no positions; it now says `no positions`.
+- Rendering note: the simulator draws a proportional font, so the header's space padding is
+  approximate (as expected).
+
+### 7. Docs
+
+`README.md` (what it is, setup, run order, troubleshooting, safety rules, privacy, what existed
+before Nov 23 plus the open-source list with versions and licenses read from the installed
+packages), `docs/architecture.md`, `docs/ws-protocol.md`. Per-module pages, a decision log and a
+how-to guide are deferred to Day 6. Until then, this build log is where decisions are recorded.

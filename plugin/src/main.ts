@@ -47,7 +47,8 @@ link = new BackendLink({
   },
   onOther: (f) => {
     if (f.type === 'ack') {
-      logLine(`ack ${f.action} -> ${f.view.index + 1}/${f.view.count}${f.note ? ` (${f.note})` : ''}`)
+      const where = f.view.count ? `${f.view.index + 1}/${f.view.count}` : 'no positions'
+      logLine(`ack ${f.action} -> ${where}${f.note ? ` (${f.note})` : ''}`)
     } else if (f.type === 'error') logLine(`backend error: ${f.error}`)
     else if (f.type === 'hello') logLine(`hello: protocol v${f.v}, ${f.network}`)
   },
