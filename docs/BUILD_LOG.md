@@ -336,3 +336,20 @@ tunnel: change the host in `plugin/app.json` (both entries), `plugin/.env.local`
 
 Note: through ngrok, the backend logs the client's **public IP** in uvicorn access lines. That's
 expected and local only, but don't paste those logs publicly.
+
+### 10. Published to GitHub
+
+- Repo: <https://github.com/Tejasv-Singh/tripwire> (public, created by the user). `origin` =
+  `https://github.com/Tejasv-Singh/tripwire.git`, branch `main`.
+- **Pre-publish secret scan, all commits:** the only env files ever committed are `.env.example`
+  and `plugin/.env.example`, with every secret value empty. The live `PAIRING_CODE` appears in 0
+  commits. No hits for Telegram-token, `sk-ant-`, 64-hex private-key, GitHub-token or PEM
+  patterns. `.env` and `plugin/.env.local` are gitignored and were never committed.
+- **Author email:** before the first push, all 7 local commits were rewritten from the personal
+  address to the GitHub noreply address (`git filter-branch --env-filter`). Dates, messages and
+  the final tree are unchanged; the tree hash was checked before and after. This repo's
+  `git config --local user.email` is now the noreply address, so future commits use it too.
+  Global git config is untouched.
+- If you clone this on another machine, set the same local email there:
+  `git config user.email "<id>+Tejasv-Singh@users.noreply.github.com"` (the id is shown under
+  GitHub → Settings → Emails).
