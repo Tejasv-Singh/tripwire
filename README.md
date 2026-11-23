@@ -59,8 +59,10 @@ if you want to use real glasses.
 3. **Configure the plugin.** Copy `plugin/.env.example` to `plugin/.env.local`. Set
    `VITE_BACKEND_URL` to your HTTPS backend origin, and `VITE_PAIRING_CODE` to the same value as
    `PAIRING_CODE`. The pairing code is only read in development builds.
-4. **Set up the tunnel once.** Install ngrok (`winget install ngrok.ngrok`, or see
-   [ngrok.com/download](https://ngrok.com/download)). Then run
+4. **Set up the tunnel once.** Install ngrok with
+   `winget install --id Ngrok.Ngrok --exact --source winget` (or see
+   [ngrok.com/download](https://ngrok.com/download)). Then **open a new terminal**, run
+   `ngrok update` (winget ships 3.3.1, which predates the `--url` flag), and then
    `ngrok config add-authtoken <your token from dashboard.ngrok.com>`.
 5. **If you use a different backend host**, put both `https://<host>` and `wss://<host>` in the
    `network.whitelist` of `plugin/app.json`, and update `VITE_BACKEND_URL` and the `tunnel` script

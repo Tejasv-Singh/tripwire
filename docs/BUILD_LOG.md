@@ -295,3 +295,15 @@ environment variable overrides `.env.local`), simulator with `--automation-port 
 before Nov 23 plus the open-source list with versions and licenses read from the installed
 packages), `docs/architecture.md`, `docs/ws-protocol.md`. Per-module pages, a decision log and a
 how-to guide are deferred to Day 6. Until then, this build log is where decisions are recorded.
+
+### 8. ngrok install (Windows)
+
+- The winget ID is **`Ngrok.Ngrok`**; `ngrok.ngrok` isn't found with `--exact`.
+  `winget install --id Ngrok.Ngrok --exact --source winget` installed **3.3.1** (2023) from
+  `bin.equinox.io` (hash verified) and added its folder to the user PATH, so only shells opened
+  afterwards see it.
+- 3.3.1 predates `ngrok http --url=…`, so `ngrok update` was run straight away and moved it to
+  **3.39.13** (`--url` confirmed in `ngrok http --help`). winget still lists 3.3.1. If ngrok is
+  ever reinstalled through winget, run `ngrok update` again.
+- The authtoken (`ngrok config add-authtoken …`, saved in `%LOCALAPPDATA%\ngrok\ngrok.yml`) is
+  added by the user, never by tooling, and is never committed.
