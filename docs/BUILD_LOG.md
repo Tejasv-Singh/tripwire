@@ -279,6 +279,13 @@ environment variable overrides `.env.local`), simulator with `--automation-port 
   and each was acked. So the simulator's **down = `SCROLL_BOTTOM_EVENT`**, which confirms the
   swipe mapping (still to be checked on hardware).
 - Fixed: the ack log line printed `1/0` when there were no positions; it now says `no positions`.
+- **Hyperliquid expires sockets.** After about 12 minutes the testnet server closed our WS with
+  `1000 (OK) Expired`. The feed logged it, reconnected 1.5 s later and resubscribed
+  (`/healthz` → `reconnects: 1`). Expect this regularly. It isn't a bug, and the HUD only shows
+  "feed reconnecting" for those ~1–2 s.
+- When stopping background `npx vite`, the child `node …/vite.js` kept port 5173 open, and
+  `strictPort` would then make the next `plugin:dev` fail. If 5173 is "in use", look for a
+  leftover `node … vite.js` process.
 - Rendering note: the simulator draws a proportional font, so the header's space padding is
   approximate (as expected).
 
