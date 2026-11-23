@@ -1,0 +1,5 @@
+# Normalise line endings in the repo to LF (cross-platform public repo); Windows checkouts may use CRLF.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.ehpk binary

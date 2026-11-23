@@ -66,7 +66,9 @@ class Settings(BaseSettings):
     def _check_address(cls, v: str) -> str:
         v = v.strip()
         if v and not _ADDRESS_RE.match(v):
-            raise ValueError("HL_ACCOUNT_ADDRESS must be empty or a 0x-prefixed 40-hex-char address")
+            raise ValueError(
+                "HL_ACCOUNT_ADDRESS must be empty or a 0x-prefixed 40-hex-char address"
+            )
         return v.lower()
 
     @field_validator("pairing_code")

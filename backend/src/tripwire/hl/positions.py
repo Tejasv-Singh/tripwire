@@ -45,7 +45,7 @@ class Position:
 
 
 def to_float(value: Any) -> float | None:
-    """Hyperliquid sends numbers as strings ("3412.5") and sometimes null. Returns None if unusable."""
+    """HL sends numbers as strings ("3412.5") and sometimes null. None if unusable."""
     if value is None or value == "":
         return None
     try:
@@ -114,7 +114,8 @@ def normalize_position(
     mark, mark_source = pick_mark(marks.get(coin), mid)
     assert mark is not None  # mid is always set above
 
-    lev = raw.get("leverage") if isinstance(raw.get("leverage"), Mapping) else {}
+    lev_raw = raw.get("leverage")
+    lev: Mapping[str, Any] = lev_raw if isinstance(lev_raw, Mapping) else {}
     leverage = to_float(lev.get("value")) or 0.0
     leverage_type = str(lev.get("type", "cross"))
 
