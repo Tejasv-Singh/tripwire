@@ -1,0 +1,23 @@
+{
+  "name": "tripwire",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Trading-session risk co-pilot for Even Realities G2 glasses (Hyperliquid TESTNET + Telegram)",
+  "license": "MIT",
+  "scripts": {
+    "setup": "uv --directory backend sync && npm --prefix plugin install",
+    "backend:dev": "uv --directory backend run uvicorn tripwire.main:create_app --factory --host 127.0.0.1 --port 8000 --reload --reload-dir src",
+    "backend:start": "uv --directory backend run uvicorn tripwire.main:create_app --factory --host 127.0.0.1 --port 8000",
+    "backend:test": "uv --directory backend run pytest",
+    "backend:check": "uv --directory backend run ruff check . && uv --directory backend run ruff format --check . && uv --directory backend run mypy",
+    "plugin:dev": "npm --prefix plugin run dev",
+    "plugin:test": "npm --prefix plugin test",
+    "plugin:build": "npm --prefix plugin run build",
+    "plugin:pack": "npm --prefix plugin run pack",
+    "sim": "npm --prefix plugin run simulate",
+    "sim:auto": "npm --prefix plugin run simulate:auto",
+    "tunnel": "ngrok http --url=caucus-strategic-endorse.ngrok-free.dev 8000",
+    "test": "npm run backend:test && npm run plugin:test",
+    "check": "npm run backend:check && npm --prefix plugin run typecheck && npm test"
+  }
+}

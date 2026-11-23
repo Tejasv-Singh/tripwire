@@ -1,0 +1,24 @@
+{
+  "package_id": "com.tejasvsingh.tripwire",
+  "edition": "202601",
+  "name": "Tripwire",
+  "version": "0.1.0",
+  "min_app_version": "2.2.10",
+  "min_sdk_version": "0.0.16",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Connect to the Tripwire backend for live Hyperliquid testnet positions.",
+      "whitelist": [
+        "https://caucus-strategic-endorse.ngrok-free.dev",
+        "wss://caucus-strategic-endorse.ngrok-free.dev"
+      ]
+    },
+    {
+      "name": "g2-microphone",
+      "desc": "Reserved for upcoming voice commands; not used yet."
+    }
+  ],
+  "supported_languages": ["en"]
+}

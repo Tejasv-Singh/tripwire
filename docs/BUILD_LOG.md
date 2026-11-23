@@ -162,3 +162,94 @@ price is a heartbeat, not a stuck feed (watch `seq` and `feed.age_ms`).
 **Checks**: `uv run ruff check .`, `uv run ruff format --check .`, `uv run mypy` (strict),
 `uv run pytest` → **59 passed**. (One harmless `StarletteDeprecationWarning` from FastAPI's
 TestClient about `httpx` — upstream, ignore.)
+
+### 4. Plugin (Even Hub, Vite + TypeScript)
+
+Scaffolded with `npx degit even-realities/evenhub-templates/asr plugin`, then:
+
+| Change vs. template | Why |
+|---|---|
+| `@evenrealities/even_hub_sdk` pinned to exactly **`0.0.16`** (template had `^0.0.10`) | spec; reproducible |
+| `evenhub-cli` `0.2.0`, `evenhub-simulator` `0.9.5` pinned exactly; `vitest` added | current versions; tests |
+| `src/asr/stt.ts` and all mic/STT wiring removed; template `README.md` removed | Tripwire doesn't use STT yet; the template README described STT only |
+| `g2-microphone` permission **kept** in `app.json` (desc says "reserved") | user asked for `["network","g2-microphone"]`; voice commands later |
+| `vite.config.ts`: `strictPort: true`, vitest config | 5173 is assumed by the simulator, CORS and docs |
+| `simulate` script calls `node node_modules/@evenrealities/evenhub-simulator/bin/index.js` | on this machine `npm install` did **not** create the `.bin/evenhub-simulator` link (an `npm rebuild` fixed it, but a fresh clone could hit it again) |
+| `simulate:auto` adds `--automation-port 9898` | the simulator's HTTP API (`/api/screenshot/glasses`, `/api/input`, `/api/console`) — used to verify the exit check |
+| `pack` writes `tripwire.ehpk` (`-o`) | instead of the default `out.ehpk`; `*.ehpk` is gitignored |
+
+**`app.json`**: `package_id` `com.tejasvsingh.tripwire`, name `Tripwire`, `min_app_version`
+`2.2.10` (required by SDK 0.0.16), `min_sdk_version` `0.0.16`, permissions `network` (whitelist:
+`https://caucus-strategic-endorse.ngrok-free.dev` **and** `wss://caucus-strategic-endorse.ngrok-free.dev`)
+and `g2-microphone`. `evenhub pack app.json dist` accepts it (verified; produced a 41 KB `.ehpk`).
+⚠️ If the backend host changes, update **both** the whitelist and `VITE_BACKEND_URL`.
+
+**Config** (`src/config.ts`, `plugin/.env.example` → copy to `plugin/.env.local`, gitignored):
+- `VITE_BACKEND_URL` — backend origin; the WS URL is derived (`https→wss`, `+ /ws?code=…`).
+  Not hard-coded in source.
+- `VITE_PAIRING_CODE` — **dev only**. Guarded by `import.meta.env.DEV`, so `vite build` drops it:
+  verified by grepping `dist/` for the code after a build (not found). In production the code is
+  typed into the companion page and saved with `bridge.setLocalStorage('tripwire.pairingCode', …)`;
+  stored value wins over the dev value.
+- `plugin/.env.local` was created locally with the ngrok URL and the pairing code from `/.env`.
+
+**Modules** (`plugin/src/`):
+
+| File | Responsibility |
+|---|---|
+| `main.ts` | Boot: companion UI → `waitForEvenAppBridge()` → load pairing code → create glasses page → open WS → route input → 10 s clock tick → 30 s `/healthz` poll |
+| `glasses.ts` | Creates **one** page with **one** 576×288 text container (`isEventCapture: 1`), then only ever calls `textContainerUpgrade`. Latest-wins queue: one upgrade in flight at a time, newest pending text sent next, identical text skipped. No page rebuilds for live numbers. |
+| `hud.ts` | Pure renderer `renderHud({frame, link, now, frameAgeMs})` → text. ASCII only, ≤ 46 cols, ≤ 9 lines; `fit()` is a last-resort sanitiser (non-ASCII → `?`, overflow → `~`). |
+| `link.ts` | WebSocket client: backoff 1 s → 15 s, watchdog (no frame for 15 s → reconnect; backend heartbeats every 5 s), close code 4401 → "rejected" (no retry loop), `reconnectNow()` for FOREGROUND_ENTER / new code. |
+| `input.ts` | Pure event → command mapping (table `SWIPE_TO_ACTION`). |
+| `api.ts` | `backendFetch()` — **every** HTTP call goes through it and gets `ngrok-skip-browser-warning: true`. `fetchHealth()` fails loudly if the reply isn't JSON (ngrok's warning page is HTML). |
+| `protocol.ts` | Wire types mirrored from the backend + `parseServerFrame()` (rejects non-JSON). |
+| `ui.ts` | Companion page: status chip, backend + health, **mirror of the glasses text**, pairing-code field, rolling log (also `console.log` with a `[tripwire]` prefix). |
+
+**Input mapping** (`input.ts`):
+
+| Glasses / ring event | Command |
+|---|---|
+| `SCROLL_BOTTOM_EVENT` (swipe down) | intent `next` |
+| `SCROLL_TOP_EVENT` (swipe up) | intent `prev` |
+| `CLICK_EVENT` (tap; arrives as `eventType: undefined`) | intent `actions` (logged only on Day 1) |
+| `DOUBLE_CLICK_EVENT` | `shutDownPageContainer(1)` → OS exit confirmation (checked first, always) |
+| `FOREGROUND_ENTER_EVENT` | `link.reconnectNow()` |
+| `SYSTEM_EXIT_EVENT` / `ABNORMAL_EXIT_EVENT` | close WS, unsubscribe |
+
+Swipe direction is a guess from the event names; if it feels inverted on hardware, swap the two
+entries in `SWIPE_TO_ACTION`.
+
+**HUD layout** (`hud.ts`; exact mock reproduced in `hud.test.ts`):
+```
+TRIPWIRE            TESTNET      HH:MM
+ETH-PERP LONG 0.50 @ 3,412  5x          (+ "  2/3" when several positions)
+uPnL +$41.20 (+2.4%)
+Liq 2,980  12.7% away                   ("Liq none", "AT/PAST LIQ", "(mid)" when no markPx)
+----------------------------------------
+tap: actions  swipe: next  2x: exit
+```
+No position: line 2 = `ETH-PERP  1,721.9  mark` (or `mid` if no markPx yet), line 3 =
+`No account set (price only)` / `No open position`. Link problems replace the body lines
+(`Connecting...`, `Backend unreachable. Retrying in Ns...`, `Pairing code rejected.`, `Not paired.`).
+Number formats: live prices at 5 significant figures (Hyperliquid's own precision), entry/liq at 4,
+size `0.50`-style, uPnL `+$41.20`, pct one decimal. Clock is the phone's local time.
+The G2 font is proportional, so the space-padding in the header is approximate on hardware.
+
+**Checks**: `npx tsc --noEmit` clean; `npx vitest run` → **17 passed**; `npm run build` OK.
+`npm install` reports audit advisories in dev-only tooling (Vite 5 / esbuild dev server) — not
+shipped in the `.ehpk`; revisit when moving to Vite 6+.
+
+### 5. Root dev scripts (`/package.json`)
+
+No `make` on Windows, so the monorepo commands are npm scripts:
+
+| Script | Runs |
+|---|---|
+| `npm run setup` | `uv sync` in `backend/` + `npm install` in `plugin/` |
+| `npm run backend:dev` | uvicorn factory on `127.0.0.1:8000` with `--reload` (watches `backend/src`) |
+| `npm run backend:start` | same without reload |
+| `npm run plugin:dev` | Vite dev server on `:5173` |
+| `npm run sim` / `sim:auto` | simulator → `http://localhost:5173` (`:auto` adds automation API on `:9898`) |
+| `npm run tunnel` | `ngrok http --url=caucus-strategic-endorse.ngrok-free.dev 8000` |
+| `npm test` / `npm run check` | all tests / tests + ruff + mypy + tsc |
