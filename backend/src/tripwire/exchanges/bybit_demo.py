@@ -1,5 +1,9 @@
 """Bybit demo-trading adapter: a STUB that shows how a second exchange plugs in. No requests.
 
+The full switch plan (guard, env vars, every endpoint, feed translation, a 2-hour budget) is in
+docs/FALLBACK_BYBIT.md. It supersedes the sketch below where they differ (e.g. testnet is the
+default env there, and closes are IOC limits with the same 5 % cap as Hyperliquid).
+
 Bybit's demo trading (https://api-demo.bybit.com, v5 API) would map like this:
   stream_positions   WS private "position" topic (wss://stream-demo.bybit.com/v5/private),
                      or GET /v5/position/list?category=linear

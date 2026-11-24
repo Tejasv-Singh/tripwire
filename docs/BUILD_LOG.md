@@ -1496,7 +1496,7 @@ polling, so no conflict with the real backend). Posts are visible at `GET /demo/
   `●` can never reach the glasses in ascii mode.
 - The legacy set keeps every Day-2 screen test byte-identical.
 - Whether `━` and `●` render, and how wide 20 `━` are on the G2 font, is checked in the exit check
-  (§27).
+  (§28).
 
 **Checks:**
 - **400 backend tests pass** (+8, new `test_latency.py`):
@@ -1512,3 +1512,67 @@ polling, so no conflict with the real backend). Posts are visible at `GET /demo/
   - `staleness()` edge cases
 - ruff, mypy and tsc are clean; `npm run build` OK. (The plugin has never had an ESLint config;
   `npx eslint` only reports that.)
+
+### 27. Docs: Bybit fallback plan and the demo storyboard (items 5 and 6)
+
+**`docs/FALLBACK_BYBIT.md`** is a plan only; nothing is implemented, and the stub
+`exchanges/bybit_demo.py` now points to it. It is built so a switch takes under 2 hours:
+
+**Environment:**
+- `BYBIT_ENV=testnet` is the default, because it keeps "testnet only" literal.
+- `demo` (a paper account on mainnet infrastructure, which needs mainnet public price streams)
+  is an explicit opt-in.
+
+**The guard:**
+- Endpoints are an exact-match allowlist per env. There is no free-form URL variable.
+- Auth is only ever sent to the allowlisted REST and private-WS hosts.
+- A startup `GET /v5/account/info` must pass, which proves the key belongs to that env.
+- WATCH mode is refused on Bybit, because Bybit positions are private.
+
+**The design choice:**
+- The Bybit feed translates tickers and positions into the **Hyperliquid shapes `MarketState`
+  already eats** (`update_asset_ctx`, `update_clearinghouse`).
+- So the HUD, alerts, `/status`, the session summary and the policy guard stay untouched.
+
+**Per method:**
+- Close = reduce-only IOC limit at mid ± 5 %, confirmed by polling `order/realtime`.
+- SL = `position/trading-stop` (Full, MarkPrice): one call replaces the stop.
+- Open = `set-leverage` + `order/create` with the SL and TP attached.
+- P&L = `position/closed-pnl` (max 7-day window).
+- Rounding is step-based (`qtyStep` / `tickSize` with `Decimal`). Hyperliquid's
+  5-significant-figure rule does not apply.
+
+**Verification:**
+- Facts were read from Bybit's v5 docs today: URLs, the signing string, WS auth and ping, every
+  parameter name.
+- Three points are marked **check** because the docs don't say them:
+  - whether `closedPnl` is net of fees
+  - the `orderStatus` enum names
+  - the retCode for "leverage not modified"
+- The plan includes a 120-minute budget in six steps, each with a "done when".
+
+**`docs/DEMO.md`: a 3:00 storyboard on a REAL testnet position.**
+- Shots, in order:
+  - HUD
+  - an alert raised by `/threshold` → SL to breakeven
+  - voice "close a quarter" → tap → fill
+  - a forwarded $15 open with SL → fill, then a forwarded $1,000 open → BLOCKED
+  - glasses off → the alert DM and `/status` latency
+  - End session → the journal post
+  - a safety title card
+- Each beat has a proof shot in the Hyperliquid testnet UI.
+- A header table says what may be on camera: `DEMO` never, `DRY RUN` only in rehearsal.
+- Alternatives are planned, not improvised: a position under water (the guard blocks SL to
+  breakeven), a misheard voice command, and the optional Business reply.
+- **Checklist:**
+  - The day before: funds, `golive:check` all PASS, a full `DRY_RUN=true` rehearsal, glyphs.
+  - 30 minutes before: `/healthz` fields, the isolated 5x ~$100 position, and the threshold
+    value read off the HUD.
+  - Privacy in every frame.
+  - Afterwards: `/threshold 5`, because it persists.
+- No-funds fallback: the WATCH version, honestly labelled, never the fake exchange.
+
+**Bug found while writing the storyboard:** a forwarded `ETH long market $1000 5x` (no SL) is
+blocked for **"Opening orders need a stop-loss (sl)"**, not for the notional, because the SL check
+runs first in `policy.py`. The storyboard's over-limit message therefore includes `sl 1630`.
+`GO_LIVE.md` already did.
