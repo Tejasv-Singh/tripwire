@@ -58,6 +58,16 @@ class Settings(BaseSettings):
     anthropic_api_key: SecretStr = SecretStr("")  # unused on Day 1
     pairing_code: SecretStr  # required: the plugin must present it as /ws?code=...
 
+    # Your own numeric Telegram user id: only this user may use /kill, /status, forwarded order
+    # drafts, and receives alert DMs. The bot's /start reply tells you the number.
+    telegram_owner_id: int | None = None
+
+    # --- policy guard (policy.py) ---------------------------------------------------------------
+    kill_switch: bool = False  # true -> no order that adds exposure (closes / tighter SLs still ok)
+    max_open_notional_usd: float = 250.0  # per opening order
+    max_leverage: float = 5.0  # per opening order
+    daily_loss_limit_usd: float = 100.0  # realized loss today (UTC) that locks opening orders
+
     # --- operational ---------------------------------------------------------------------------
     hl_api_url: str = TESTNET_API_URL  # checked by assert_testnet(); do not change
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
@@ -89,6 +99,11 @@ class Settings(BaseSettings):
         if len(v.get_secret_value().strip()) < MIN_PAIRING_CODE_LEN:
             raise ValueError(f"PAIRING_CODE must be at least {MIN_PAIRING_CODE_LEN} characters")
         return SecretStr(v.get_secret_value().strip())
+
+    @field_validator("telegram_owner_id", mode="before")
+    @classmethod
+    def _empty_owner_is_none(cls, v: object) -> object:
+        return None if isinstance(v, str) and not v.strip() else v
 
     @property
     def watch_mode(self) -> bool:

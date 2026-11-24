@@ -1,7 +1,8 @@
 """Telegram Business bot skeleton (python-telegram-bot, Bot API only — no userbot / MTProto).
 
 Day 1 behaviour:
-  /start                    -> short intro
+  /start                    -> short intro + the sender's numeric user id (for TELEGRAM_OWNER_ID)
+  /kill, /unkill            -> owner only: engage / release the policy kill switch (policy.py)
   business_connection       -> log metadata + upsert into SQLite (who connected, enabled, can reply)
   business_message          -> log metadata ONLY (ids, length) — text is never logged or stored
   forwarded private message -> echo it back (placeholder for "forward a message to the copilot")
@@ -21,6 +22,7 @@ import asyncio
 import logging
 import warnings
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, Literal
 
@@ -36,6 +38,7 @@ from telegram.ext import (
 )
 
 from tripwire.db import Store
+from tripwire.policy import KillSwitch
 
 log = logging.getLogger(__name__)
 
@@ -65,9 +68,78 @@ START_TEXT = (
 )
 
 
-async def on_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_message:
-        await update.effective_message.reply_text(START_TEXT)
+@dataclass(slots=True)
+class BotServices:
+    """What the bot's handlers may touch. `owner_id` gates every command that reveals positions
+    or changes behaviour; everyone else only gets /start and the forward echo."""
+
+    owner_id: int | None = None
+    kill_switch: KillSwitch | None = None
+
+
+def is_owner(update: Update, services: BotServices | None) -> bool:
+    user = update.effective_user
+    return bool(
+        services is not None
+        and services.owner_id is not None
+        and user is not None
+        and user.id == services.owner_id
+    )
+
+
+def make_start_handler(services: BotServices | None) -> CommandHandler[Any, None]:
+    async def on_start(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg, user = update.effective_message, update.effective_user
+        if msg is None:
+            return
+        text = START_TEXT
+        if user is not None:
+            if is_owner(update, services):
+                text += "\n\nYou are the owner: alerts come here; /status, /kill and /unkill work."
+            else:
+                text += (
+                    f"\n\nYour Telegram user id is {user.id}. To receive risk alerts and use "
+                    f"/status, /kill and /unkill, put TELEGRAM_OWNER_ID={user.id} in the "
+                    "backend's .env and restart it."
+                )
+        await msg.reply_text(text)
+
+    return CommandHandler("start", on_start, filters=filters.UpdateType.MESSAGE)
+
+
+def make_kill_handlers(services: BotServices | None) -> list[CommandHandler[Any, None]]:
+    async def on_kill(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        if msg is None:
+            return
+        if not is_owner(update, services) or services is None or services.kill_switch is None:
+            await msg.reply_text("Not authorized.")
+            return
+        await asyncio.to_thread(services.kill_switch.engage)
+        await msg.reply_text(
+            "KILL SWITCH ON. Only reduce-only orders (closes, tighter stop-losses) until /unkill."
+        )
+
+    async def on_unkill(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        if msg is None:
+            return
+        if not is_owner(update, services) or services is None or services.kill_switch is None:
+            await msg.reply_text("Not authorized.")
+            return
+        released = await asyncio.to_thread(services.kill_switch.release)
+        await msg.reply_text(
+            "Kill switch released."
+            if released
+            else "Telegram flag cleared, but KILL_SWITCH=true in .env keeps it ON. Edit .env and "
+            "restart to release it."
+        )
+
+    only_messages = filters.UpdateType.MESSAGE
+    return [
+        CommandHandler("kill", on_kill, filters=only_messages),
+        CommandHandler("unkill", on_unkill, filters=only_messages),
+    ]
 
 
 def make_business_connection_handler(
@@ -136,7 +208,9 @@ def on_polling_error(exc: TelegramError) -> None:
     )
 
 
-def build_application(token: str, store: Store | None) -> Application:  # type: ignore[type-arg]
+def build_application(
+    token: str, store: Store | None, services: BotServices | None = None
+) -> Application:  # type: ignore[type-arg]
     app = (
         Application.builder()
         .token(token)
@@ -145,7 +219,9 @@ def build_application(token: str, store: Store | None) -> Application:  # type: 
         .write_timeout(READ_TIMEOUT_S)
         .build()
     )
-    app.add_handler(CommandHandler("start", on_start, filters=filters.UpdateType.MESSAGE))
+    app.add_handler(make_start_handler(services))
+    for handler in make_kill_handlers(services):
+        app.add_handler(handler)
     app.add_handler(make_business_connection_handler(store))
     app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGES, on_business_message))
     app.add_handler(

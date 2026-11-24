@@ -9,6 +9,8 @@ export type MarkSource = 'markPx' | 'mid'
 export type IntentAction = 'next' | 'prev' | 'tap' | 'back'
 export type UiMode = 'hud' | 'menu' | 'confirm' | 'sending' | 'result'
 export type TradingStatus = 'off' | 'warming' | 'ready' | 'error'
+/** blocked = refused by the policy guard; dry_run = signed and logged, not sent */
+export type ResultStatus = 'filled' | 'resting' | 'placed' | 'rejected' | 'error' | 'blocked' | 'dry_run'
 
 export interface Position {
   coin: string
@@ -56,7 +58,7 @@ export type UiState =
       mode: 'result'
       coin: string | null
       ok: boolean
-      status: 'filled' | 'resting' | 'rejected' | 'error'
+      status: ResultStatus
       message: string
       label: string | null
     }
@@ -112,7 +114,7 @@ export interface AckFrame {
 export interface OrderFrame {
   type: 'order'
   ok: boolean
-  status: 'filled' | 'resting' | 'rejected' | 'error'
+  status: ResultStatus
   message: string
   coin: string
   fraction: number

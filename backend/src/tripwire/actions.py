@@ -24,11 +24,18 @@ that opens, adds to or flips a position.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from tripwire.hl.positions import Position, Side
-from tripwire.trading import SLIPPAGE, CloseRequest, OrderResult, round_size_down
+from tripwire.orders import CloseOrder, Order, OrderResult, ResultStatus
+from tripwire.policy import Decision
+from tripwire.trading import SLIPPAGE, CloseRequest, round_size_down
+
+# Policy pre-check at arm time (PolicyGuard.check bound to the live position / mark), so a
+# blocked order is refused BEFORE the confirm screen. OrderService.submit() checks again.
+Precheck = Callable[[Order], Decision]
 
 Mode = Literal["hud", "menu", "confirm", "sending", "result"]
 Intent = Literal["next", "prev", "tap", "back"]
@@ -107,6 +114,7 @@ class ActionFlow:
         trading: bool,
         size_decimals: int | None = None,
         watch: bool = False,
+        precheck: Precheck | None = None,
     ) -> Outcome:
         """`position` = the position this client is looking at (the locked coin once in a menu).
         `watch` = the positions are someone else's (WATCH_ADDRESS): the menu stays closed."""
@@ -135,7 +143,7 @@ class ActionFlow:
             if item.fraction is None:  # "Back"
                 self._go("hud")
                 return Outcome()
-            return self._arm(item, position, now, trading, size_decimals)
+            return self._arm(item, position, now, trading, size_decimals, precheck)
 
         if self.mode == "confirm":
             assert self.armed is not None
@@ -167,6 +175,7 @@ class ActionFlow:
         now: float,
         trading: bool,
         size_decimals: int | None,
+        precheck: Precheck | None = None,
     ) -> Outcome:
         assert item.fraction is not None
         if position is None or position.coin != self.coin:
@@ -181,6 +190,13 @@ class ActionFlow:
             shown = round_size_down(raw, size_decimals)
         if shown <= 0:
             return self._fail("Size rounds to 0 - use a bigger %")
+        if precheck is not None:
+            candidate = CloseOrder(
+                position.coin, position.side, item.fraction, None if item.fraction >= 1 else shown
+            )
+            decision = precheck(candidate)
+            if not decision.allowed:
+                return self._fail(f"Blocked: {decision.reason}", status="blocked")
         self.armed = Armed(
             coin=position.coin,
             side=position.side,
@@ -209,9 +225,9 @@ class ActionFlow:
             )
         )
 
-    def _fail(self, message: str) -> Outcome:
+    def _fail(self, message: str, status: ResultStatus = "rejected") -> Outcome:
         token = self._go("result")  # keeps self.armed (if any) so the result can name the action
-        self.result = OrderResult(False, "rejected", message)
+        self.result = OrderResult(False, status, message)
         return Outcome(ok=False, note=message, timer_s=RESULT_HOLD_S, token=token)
 
     def finish(self, result: OrderResult) -> Outcome:

@@ -33,8 +33,10 @@ from tripwire.hud import (
     next_send_delay,
     resolve_index,
 )
+from tripwire.orders import Order, OrderResult, OrderService
+from tripwire.policy import Decision, PolicyGuard
 from tripwire.state import MarketState
-from tripwire.trading import CloseRequest, OrderExecutor, OrderResult
+from tripwire.trading import CloseRequest, OrderExecutor
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +83,8 @@ def make_ws_router(
     pairing_code: str,
     store: Store | None,
     executor: OrderExecutor,
+    guard: PolicyGuard,
+    orders: OrderService,
     min_interval_s: float = MIN_INTERVAL_S,
     heartbeat_s: float = HEARTBEAT_S,
 ) -> APIRouter:
@@ -102,6 +106,17 @@ def make_ws_router(
             return None  # the coin the menu is about is no longer open
         return p
 
+    def live_position(coin: str) -> Position | None:
+        return next((p for p in state.positions if p.coin == coin), None)
+
+    def precheck(order: Order) -> Decision:
+        p = live_position(order.coin)
+        return guard.check(order, position=p, mark=p.mark if p else state.marks.get(order.coin))
+
+    async def send_close(order: Order) -> OrderResult:
+        assert isinstance(order, CloseRequest)
+        return await executor.close(order)
+
     def schedule(session: ClientSession, delay_s: float, token: int) -> None:
         loop = asyncio.get_running_loop()
 
@@ -118,7 +133,10 @@ def make_ws_router(
 
     async def run_order(ws: WebSocket, session: ClientSession, req: CloseRequest) -> None:
         try:
-            result = await executor.close(req)
+            p = live_position(req.coin)
+            result = await orders.submit(  # policy guard, then the exchange
+                req, position=p, mark=p.mark if p else None, send=send_close
+            )
         except Exception as exc:  # an executor bug must not leave the screen stuck on "sending"
             log.exception("order task failed")
             result = OrderResult(False, "error", f"{type(exc).__name__}: {exc}"[:120])
@@ -202,6 +220,7 @@ def make_ws_router(
                 trading=trading_on(),
                 size_decimals=executor.size_decimals(position.coin) if position else None,
                 watch=state.watch,
+                precheck=precheck,
             )
             count = len(state.positions)
             if out.nav is not None:

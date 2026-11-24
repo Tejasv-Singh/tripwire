@@ -645,3 +645,64 @@ someone else's address".
   `/healthz` showed `mode: watch, positions: 7`, `trading: off - watch only`, and real positions
   with markPx, e.g. `BTC SHORT 0.03591 @ 59463.0 mark=59363.0 upnl=4.45 liq=164468.8`.
 - The simulator check is in §20 (exit check).
+
+### 14. Policy guard: one module every order passes through (item 4)
+
+**Shape:**
+- `orders.py` holds the order types:
+  - `CloseOrder` (Day-2 `CloseRequest`, kept as an alias in `trading.py`)
+  - `StopOrder` (move a stop-loss)
+  - `OpenOrder` (open or add to a position)
+  - `OrderResult`, with new statuses `blocked`, `placed` and `dry_run`
+- `orders.py` also holds **`OrderService.submit()`, the only code path that sends**. It refreshes
+  realized PnL, runs `PolicyGuard.check()`, and only then calls the exchange. A block returns
+  `OrderResult(status="blocked", message=<reason>)` and nothing reaches the exchange.
+- `policy.py`: `check_order(order, PolicyContext, PolicyLimits) -> Decision(allowed, rule,
+  reason)`. It is **pure**, so every rule is tested without I/O. `PolicyGuard` wraps it with the
+  live inputs.
+- The action flow also calls `guard.check()` **at arm time** (`precheck`), so a blocked order
+  shows `Blocked: <reason>` instead of a confirm screen. `submit()` checks again, because the
+  position can change between the two taps.
+
+**Rules (first failing rule wins; the rule names are stable):**
+
+| Order | Allowed when | Refused with |
+|---|---|---|
+| any | — | `watch_only` (WATCH mode never trades) |
+| Close | the position exists on the confirmed side. **Never blocked** by the kill switch or the loss lock: it only reduces risk | `no_position`, `side_mismatch`, `bad_size` |
+| Stop | the new SL is on the protective side of mark **and** tighter than the current one (or there was none). Not blocked by the kill switch or the loss lock | `sl_would_trigger` (at or past mark: it would fire at once, use Close), `sl_loosen`, `no_price`, `bad_price` |
+| Open | none of the refusals below apply | in this order: `kill_switch`, `daily_loss_lock`, `sl_required`, `bad_size`, `max_notional` ($250), `max_leverage` (5x), `no_price`, `sl_wrong_side`, `tp_wrong_side`, `opposite_position` (would flip: use Close) |
+
+Notes on the limits:
+- They are inclusive: $250 at 5x is allowed.
+- The notional cap is **per order**. Adding to an existing same-side position is allowed if that
+  order is within limits.
+
+**Kill switch (`KillSwitch`):**
+- It is ON if `KILL_SWITCH=true` in `.env` **or** it was engaged with `/kill` in Telegram.
+- The Telegram flag is stored in a new SQLite `kv` table, so it survives restarts.
+- `/unkill` only clears the Telegram flag. With the `.env` flag set it replies that `.env` keeps
+  it on.
+- `/healthz` → `policy` shows `kill_switch`, its `kill_switch_source`, `realized_pnl_today`,
+  `loss_locked` and the limits.
+
+**Telegram owner (`TELEGRAM_OWNER_ID`):**
+- New: anyone can message a public bot, so `/kill`, `/unkill` (and later `/status`, forwarded
+  drafts and alert DMs) only work for this numeric user id. Everyone else gets
+  "Not authorized.", and with no owner set, nobody is authorized.
+- `/start` now tells the sender their id and how to set it.
+
+**Daily loss lock:** `PolicyGuard(pnl_source=...)` sums realized PnL for today (UTC). The
+source is plugged in with the exchange adapter (§15). If the source fails, the guard keeps the
+last value instead of failing open to 0.
+
+**Checks:** **155 backend tests pass** (+40, new `test_policy.py`). Every rule has a refusal
+test with its exact reason, plus tests that:
+- closes go through with the kill switch on;
+- the kill switch beats everything for opens;
+- the kill switch persists in SQLite;
+- the guard keeps the last PnL on error;
+- `OrderService` never calls the exchange when blocked;
+- `/kill` and `/unkill` are owner-only.
+
+Plugin: result titles `BLOCKED`, `PLACED` and `DRY RUN` (29 tests). mypy, ruff and tsc are clean.

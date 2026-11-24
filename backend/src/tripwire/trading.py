@@ -21,12 +21,12 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
 from typing import Any, Literal, Protocol
 
 from tripwire.config import TESTNET_API_URL, TestnetGuardError, assert_testnet
-from tripwire.hl.positions import Side, to_float
+from tripwire.hl.positions import to_float
+from tripwire.orders import CloseOrder, OrderResult, ResultStatus
 
 log = logging.getLogger(__name__)
 
@@ -36,25 +36,8 @@ ORDER_TIMEOUT_S = 25.0  # whole market_close() call: user_state + all_mids + ord
 MAX_MESSAGE_LEN = 120
 
 TradingStatus = Literal["off", "warming", "ready", "error"]
-ResultStatus = Literal["filled", "resting", "rejected", "error"]
-
-
-@dataclass(frozen=True, slots=True)
-class CloseRequest:
-    coin: str
-    side: Side  # side of the position being reduced (what the user saw and confirmed)
-    fraction: float  # 0.25 / 0.5 / 1.0
-    size: float | None  # coin units to close; None = the whole live position
-
-
-@dataclass(frozen=True, slots=True)
-class OrderResult:
-    ok: bool
-    status: ResultStatus
-    message: str  # short, human, shown on the glasses
-    filled_size: float | None = None
-    avg_px: float | None = None
-    oid: int | None = None
+CloseRequest = CloseOrder  # Day-2 name, kept for the executor API
+__all__ = ["CloseRequest", "OrderResult", "ResultStatus"]
 
 
 class OrderExecutor(Protocol):

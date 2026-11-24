@@ -10,6 +10,7 @@ import logging
 import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from functools import partial
 from typing import Any
 
 from fastapi import FastAPI
@@ -18,8 +19,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from tripwire.config import Settings, assert_testnet
 from tripwire.db import Store
 from tripwire.hl.feed import HyperliquidFeed
+from tripwire.orders import OrderService
+from tripwire.policy import KillSwitch, PolicyGuard, PolicyLimits
 from tripwire.state import MarketState
-from tripwire.telegram_bot import TelegramBot
+from tripwire.telegram_bot import BotServices, TelegramBot, build_application
 from tripwire.trading import DisabledExecutor, HyperliquidExecutor, OrderExecutor
 from tripwire.ws import make_ws_router
 
@@ -80,7 +83,23 @@ def create_app(
 
     state = MarketState(ref_coin="ETH", account=settings.stream_address, watch=settings.watch_mode)
     store = Store(settings.resolved_db_path)
-    bot = TelegramBot(settings.telegram_bot_token.get_secret_value() if run_bot else "", store)
+    kill_switch = KillSwitch(settings.kill_switch, store)
+    guard = PolicyGuard(
+        PolicyLimits(
+            max_open_notional_usd=settings.max_open_notional_usd,
+            max_leverage=settings.max_leverage,
+            daily_loss_limit_usd=settings.daily_loss_limit_usd,
+        ),
+        kill_switch,
+        watch_only=settings.watch_mode,
+    )
+    orders = OrderService(guard)
+    bot_services = BotServices(owner_id=settings.telegram_owner_id, kill_switch=kill_switch)
+    bot = TelegramBot(
+        settings.telegram_bot_token.get_secret_value() if run_bot else "",
+        store,
+        app_factory=partial(build_application, services=bot_services),
+    )
     feed = HyperliquidFeed(settings.hl_api_url, state) if run_feed else None
     if executor is None:
         executor = (
@@ -101,6 +120,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(store.init)
+        await asyncio.to_thread(kill_switch.load)
+        if kill_switch.engaged:
+            log.warning("Kill switch is ON (%s): only reduce-only orders", kill_switch.source)
         feed_task = asyncio.create_task(feed.run(), name="hl-feed") if feed else None
         warm_task = asyncio.create_task(trader.warm_up(), name="trading-warm-up")
         await bot.start()
@@ -138,6 +160,8 @@ def create_app(
             pairing_code=settings.pairing_code.get_secret_value(),
             store=store,
             executor=trader,
+            guard=guard,
+            orders=orders,
             min_interval_s=min_interval_s,
             heartbeat_s=heartbeat_s,
         )
@@ -164,6 +188,7 @@ def create_app(
                 "detail": trader.detail,
                 "mode": "reduce-only closes, two-tap confirm",
             },
+            "policy": guard.status(),
             "telegram": {"status": bot.status, "detail": bot.detail},
             "ws_clients": state.listener_count,
         }
@@ -171,4 +196,6 @@ def create_app(
     app.state.market = state  # handy for tests / debugging
     app.state.store = store
     app.state.executor = trader
+    app.state.guard = guard
+    app.state.kill_switch = kill_switch
     return app

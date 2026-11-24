@@ -3,6 +3,7 @@
   business_connections  one row per Telegram Business connection (who connected the bot, enabled?)
   intent_log            every intent the glasses sent (audit trail for later risk actions)
   order_log             every reduce-only close that was confirmed on the glasses, and its result
+  kv                    small persistent switches (kill switch, alert threshold), no secrets
 
 Each call opens its own short-lived connection; callers run these via asyncio.to_thread().
 """
@@ -44,6 +45,11 @@ CREATE TABLE IF NOT EXISTS order_log (
     avg_px       REAL,
     oid          INTEGER,
     message      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS kv (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL
 );
 """
 
@@ -150,6 +156,20 @@ class Store:
                 "SELECT * FROM order_log ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def kv_get(self, key: str) -> str | None:
+        with closing(self._connect()) as conn:
+            row = conn.execute("SELECT value FROM kv WHERE key = ?", (key,)).fetchone()
+            return None if row is None else str(row[0])
+
+    def kv_set(self, key: str, value: str) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                "INSERT INTO kv (key, value, updated_at) VALUES (?, ?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (key, value, int(time.time())),
+            )
 
     def recent_intents(self, limit: int = 20) -> list[tuple[int, str, str]]:
         with closing(self._connect()) as conn:

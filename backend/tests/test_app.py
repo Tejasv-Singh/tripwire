@@ -1,4 +1,4 @@
-"""App wiring: /healthz, CORS, /ws pairing, frames, intents, throttle — feed and bot disabled."""
+"""App wiring: /healthz, CORS, /ws pairing, frames, intents, throttle â€” feed and bot disabled."""
 
 from __future__ import annotations
 
@@ -250,4 +250,4 @@ async def test_bot_with_empty_token_is_disabled() -> None:
 
 def test_bot_application_registers_handlers_offline() -> None:
     app = build_application("123456:TEST-TOKEN-not-real", store=None)
-    assert len(app.handlers[0]) == 4
+    assert len(app.handlers[0]) == 6  # start, kill, unkill, business conn/msg, forward

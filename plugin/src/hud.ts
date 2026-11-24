@@ -2,7 +2,7 @@
 // Hard limits (enforced by hud.test.ts): ASCII only, <= 46 chars per line, <= 9 lines.
 // The G2 font is proportional, so column padding is approximate on the real display.
 
-import type { HudFrame, MenuScreen, OrderScreen, Position, ResultScreen, UiMode } from './protocol'
+import type { HudFrame, MenuScreen, OrderScreen, Position, ResultScreen, ResultStatus, UiMode } from './protocol'
 
 export const MAX_COLS = 46
 export const MAX_LINES = 9
@@ -162,7 +162,15 @@ function sendingLines(ui: OrderScreen): string[] {
   return [`SENDING  ${ui.label}  ${ui.coin}-PERP`, orderLine(ui), 'Waiting for Hyperliquid testnet...']
 }
 
-const RESULT_TITLES = { filled: 'FILLED', resting: 'RESTING', rejected: 'NOT DONE', error: 'ERROR' }
+const RESULT_TITLES: Record<ResultStatus, string> = {
+  filled: 'FILLED',
+  resting: 'RESTING',
+  placed: 'PLACED',
+  rejected: 'NOT DONE',
+  error: 'ERROR',
+  blocked: 'BLOCKED', // policy guard said no (backend policy.py); nothing was sent
+  dry_run: 'DRY RUN', // signed, logged, NOT sent (DRY_RUN=true)
+}
 
 function resultLines(ui: ResultScreen): string[] {
   const what = [ui.label, ui.coin ? `${ui.coin}-PERP` : null].filter(Boolean).join('  ')
