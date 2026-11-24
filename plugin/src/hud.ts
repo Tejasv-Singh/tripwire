@@ -1,11 +1,15 @@
 // Pure HUD renderer: (frame, link state, clock) -> glasses text.
-// Hard limits (enforced by hud.test.ts): ASCII only, <= 46 chars per line, <= 9 lines.
+// Hard limits (enforced by hud.test.ts): <= 46 chars per line, <= 9 lines, ASCII only -- except
+// RISK_GLYPH, the one non-ASCII character allowed (it heads the liquidation alert screen).
 // The G2 font is proportional, so column padding is approximate on the real display.
 
 import type { HudFrame, MenuScreen, OrderScreen, Position, ResultScreen, ResultStatus, UiMode } from './protocol'
 
 export const MAX_COLS = 46
 export const MAX_LINES = 9
+/** Heads the alert screen. Checked in the simulator (docs/BUILD_LOG.md §18); swap for '/!\' if a
+ *  display ever shows a box instead. */
+export const RISK_GLYPH = '▲' // "▲"
 const BODY_LINES = MAX_LINES - 3 // header + separator + footer are always shown
 const SEPARATOR = '-'.repeat(40)
 export const FOOTERS: Record<UiMode | 'link' | 'watch', string> = {
@@ -140,9 +144,23 @@ function slInfoLine(f: HudFrame, ui: MenuScreen): string {
   return p ? `SL now ${now}  entry ${fmtCompact(p.entry)}  mark ${fmtCompact(p.mark)}` : `SL now ${now}`
 }
 
+function alertLines(ui: MenuScreen): string[] {
+  const a = ui.alert
+  if (!a) return [`${RISK_GLYPH} RISK  ${ui.coin}-PERP`]
+  return [
+    `${RISK_GLYPH} RISK  ${a.coin}-PERP ${a.side} ${fmtSize(a.size)}`,
+    `Liq ${fmtCompact(a.liq_px)}  ${a.liq_dist_pct.toFixed(1)}% from mark (<${a.threshold_pct}%)`,
+  ]
+}
+
 function menuLines(f: HudFrame, ui: MenuScreen): string[] {
   const tag = positionTag(f.position, ui.coin)
-  const lines = ui.kind === 'sl' ? [`MOVE SL  ${tag}`, slInfoLine(f, ui)] : [`ACTIONS  ${tag}  reduce-only`]
+  const lines =
+    ui.kind === 'alert'
+      ? alertLines(ui)
+      : ui.kind === 'sl'
+        ? [`MOVE SL  ${tag}`, slInfoLine(f, ui)]
+        : [`ACTIONS  ${tag}  reduce-only`]
   ui.items.forEach((item, i) => lines.push(`${i === ui.cursor ? '>' : ' '} ${item}`))
   const note = ui.note ?? (ui.trading ? null : 'Trading off: read-only (no agent key)')
   if (note) lines.push(note)
@@ -287,6 +305,6 @@ export function wrap(text: string, width: number): string[] {
 /** Last line of defence: strip non-ASCII and truncate to MAX_COLS. */
 export function fit(line: string): string {
   // eslint-disable-next-line no-control-regex
-  const ascii = line.replace(/[^\x20-\x7E]/g, '?')
+  const ascii = line.replace(/[^\x20-\x7E▲]/g, '?') // printable ASCII + RISK_GLYPH only
   return ascii.length <= MAX_COLS ? ascii : ascii.slice(0, MAX_COLS - 1) + '~'
 }

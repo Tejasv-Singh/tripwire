@@ -3,6 +3,8 @@
 Day 1 behaviour:
   /start                    -> short intro + the sender's numeric user id (for TELEGRAM_OWNER_ID)
   /kill, /unkill            -> owner only: engage / release the policy kill switch (policy.py)
+  /threshold [pct]          -> owner only: show / set the liquidation-alert threshold (risk.py)
+  send_owner(text)          -> DM the owner (risk alerts when no glasses are connected)
   business_connection       -> log metadata + upsert into SQLite (who connected, enabled, can reply)
   business_message          -> log metadata ONLY (ids, length) — text is never logged or stored
   forwarded private message -> echo it back (placeholder for "forward a message to the copilot")
@@ -39,6 +41,7 @@ from telegram.ext import (
 
 from tripwire.db import Store
 from tripwire.policy import KillSwitch
+from tripwire.risk import AlertService
 
 log = logging.getLogger(__name__)
 
@@ -75,6 +78,7 @@ class BotServices:
 
     owner_id: int | None = None
     kill_switch: KillSwitch | None = None
+    alerts: AlertService | None = None
 
 
 def is_owner(update: Update, services: BotServices | None) -> bool:
@@ -140,6 +144,36 @@ def make_kill_handlers(services: BotServices | None) -> list[CommandHandler[Any,
         CommandHandler("kill", on_kill, filters=only_messages),
         CommandHandler("unkill", on_unkill, filters=only_messages),
     ]
+
+
+def make_threshold_handler(services: BotServices | None) -> CommandHandler[Any, None]:
+    async def on_threshold(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        if msg is None:
+            return
+        if not is_owner(update, services) or services is None or services.alerts is None:
+            await msg.reply_text("Not authorized.")
+            return
+        engine = services.alerts.engine
+        args = list(getattr(ctx, "args", None) or [])
+        if not args:
+            await msg.reply_text(
+                f"Liquidation alert at {engine.threshold_pct:g}% from mark "
+                f"(re-arms at {engine.threshold_pct + engine.hysteresis_pct:g}%). "
+                "Change it with /threshold 8"
+            )
+            return
+        try:
+            pct = float(args[0].rstrip("%"))
+        except ValueError:
+            pct = -1.0
+        if not 0 < pct <= 100:
+            await msg.reply_text("Give a percentage between 0 and 100, e.g. /threshold 8")
+            return
+        await asyncio.to_thread(services.alerts.set_threshold, pct)
+        await msg.reply_text(f"Alert threshold set to {pct:g}% (all positions re-armed).")
+
+    return CommandHandler("threshold", on_threshold, filters=filters.UpdateType.MESSAGE)
 
 
 def make_business_connection_handler(
@@ -222,6 +256,7 @@ def build_application(
     app.add_handler(make_start_handler(services))
     for handler in make_kill_handlers(services):
         app.add_handler(handler)
+    app.add_handler(make_threshold_handler(services))
     app.add_handler(make_business_connection_handler(store))
     app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGES, on_business_message))
     app.add_handler(
@@ -267,6 +302,7 @@ class TelegramBot:
         self.status: BotStatus = "disabled"
         self.detail = "not started" if self.token else "TELEGRAM_BOT_TOKEN is empty"
         self.attempts = 0
+        self.owner_id: int | None = None  # DM target for send_owner()
         self._app: Any = None
         self._task: asyncio.Task[None] | None = None
         self._factory = app_factory
@@ -319,6 +355,17 @@ class TelegramBot:
             self.status, self.detail = "running", f"@{app.bot.username}"
             log.info("Telegram bot running as @%s (attempt %d)", app.bot.username, self.attempts)
             return
+
+    async def send_owner(self, text: str) -> bool:
+        """DM the owner. False if the bot is not running, no owner is set, or Telegram refused."""
+        if self.status != "running" or self._app is None or not self.owner_id:
+            return False
+        try:
+            await self._app.bot.send_message(chat_id=self.owner_id, text=text)
+        except TelegramError as exc:
+            log.warning("Telegram DM to owner failed: %s: %s", type(exc).__name__, exc)
+            return False
+        return True
 
     async def stop(self) -> None:
         if self._task is not None and not self._task.done():

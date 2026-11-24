@@ -21,6 +21,9 @@ Intents: next | prev | tap | back   (plugin: swipe down/up, tap, double tap)
 
 Menus (`kind`):
   actions  Close 25% | Close 50% | Close 100% | Move SL... | Back       (all reduce risk)
+  alert    Move SL | Close 50% | Close all | Snooze 5m                  (risk.py raised it; it
+                                                                         waits if a confirm or an
+                                                                         order is in progress)
   sl       SL to breakeven | SL tighter 1% | Back                      (the current SL is fetched
                                                                          from the exchange when the
                                                                          submenu opens)
@@ -40,6 +43,7 @@ from tripwire.exchanges.base import StopInfo
 from tripwire.hl.positions import Position
 from tripwire.orders import CloseOrder, Order, OrderResult, ResultStatus, StopOrder
 from tripwire.policy import Decision
+from tripwire.risk import Alert
 from tripwire.trading import SLIPPAGE, round_px, round_size_down
 
 # Policy pre-check at arm time (PolicyGuard.check bound to the live position / mark), so a
@@ -47,7 +51,7 @@ from tripwire.trading import SLIPPAGE, round_px, round_size_down
 Precheck = Callable[[Order], Decision]
 
 Mode = Literal["hud", "menu", "confirm", "sending", "result"]
-MenuKind = Literal["actions", "sl"]
+MenuKind = Literal["actions", "sl", "alert"]
 Intent = Literal["next", "prev", "tap", "back"]
 
 CONFIRM_WINDOW_S = 5.0  # second tap must land within this many seconds of the first
@@ -75,6 +79,12 @@ MENUS: dict[str, tuple[MenuItem, ...]] = {
         MenuItem("sl_breakeven", "SL to breakeven"),
         MenuItem("sl_tighten", f"SL tighter {SL_TIGHTEN_PCT:g}%"),
         BACK,
+    ),
+    "alert": (
+        MenuItem("sl_menu", "Move SL"),
+        MenuItem("close50", "Close 50%"),
+        MenuItem("close100", "Close all"),
+        MenuItem("snooze", "Snooze 5m"),
     ),
 }
 MENU = MENUS["actions"]  # Day-2 name
@@ -110,6 +120,7 @@ class Outcome:
     timer_s: float | None = None  # call on_timer(token) after this many seconds
     token: int = 0
     fetch_stop: str | None = None  # load this coin's current SL, then call set_stop()
+    snooze: tuple[str, str] | None = None  # (coin, side): snooze this alert in the risk engine
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -124,15 +135,21 @@ class ActionFlow:
         self.result: OrderResult | None = None
         self.note: str | None = None
         self.stop: StopState | None = None
+        self.alert: Alert | None = None  # the alert on screen (kind "alert" and its submenus)
+        self.pending_alert: Alert | None = None  # raised during a confirm/order: shown after
         self.token = 0  # bumped on every transition; stale timers compare and do nothing
 
     # --- transitions -------------------------------------------------------------------------
     def _go(self, mode: Mode, *, note: str | None = None) -> int:
+        if mode == "hud" and self.pending_alert is not None:
+            alert, self.pending_alert = self.pending_alert, None
+            self._show_alert(alert)  # an alert that waited for the order wins over the HUD
+            return self.token
         self.mode, self.note = mode, note
         self.token += 1
         if mode == "hud":
             self.coin, self.armed, self.result, self.cursor = None, None, None, 0
-            self.kind, self.parent, self.stop = "actions", "actions", None
+            self.kind, self.parent, self.stop, self.alert = "actions", "actions", None, None
         if mode == "menu":
             self.armed, self.result = None, None
         return self.token
@@ -146,6 +163,24 @@ class ActionFlow:
             if not self.stop.loaded:
                 return Outcome(fetch_stop=self.coin)
         return Outcome()
+
+    def raise_alert(self, alert: Alert) -> bool:
+        """Show the RISK screen. True if it is on screen now; during a confirm or an order in
+        flight it waits (False) and appears as soon as that screen is left."""
+        if self.mode in ("confirm", "sending"):
+            self.pending_alert = alert
+            return False
+        self._show_alert(alert)
+        return True
+
+    def _show_alert(self, alert: Alert) -> None:
+        if self.stop is not None and self.stop.coin != alert.coin:
+            self.stop = None
+        self.coin, self.alert = alert.coin, alert
+        self.kind, self.parent, self.cursor = "alert", "alert", 0
+        self.mode, self.note = "menu", None
+        self.armed, self.result = None, None
+        self.token += 1
 
     @property
     def items(self) -> tuple[MenuItem, ...]:
@@ -192,7 +227,7 @@ class ActionFlow:
                 self._go("hud")
                 return Outcome()
             item = self.items[self.cursor]
-            ctx = _ArmCtx(position, now, trading, size_decimals, precheck)
+            ctx = _ArmCtx(position, now, trading, size_decimals, precheck, watch)
             return self._select(item, ctx)
 
         if self.mode == "confirm":
@@ -233,9 +268,17 @@ class ActionFlow:
             return Outcome()
         if item.key == "sl_menu":
             return self._open_menu("sl", parent=self.kind)
+        if item.key == "snooze":
+            alert = self.alert
+            self._go("hud")
+            if alert is None:
+                return Outcome(ok=False, note="no alert to snooze")
+            return Outcome(snooze=(alert.coin, alert.side), note="alert snoozed 5 min")
         p = ctx.position
         if p is None or p.coin != self.coin:
             return self._fail("Position is closed - nothing to do")
+        if ctx.watch:
+            return self._fail("Watch only - not your account, nothing sent")
         if not ctx.trading:
             return self._fail("Trading off: set HL_AGENT_KEY + HL_ACCOUNT_ADDRESS")
         if item.key in CLOSE_FRACTIONS:
@@ -368,6 +411,8 @@ class ActionFlow:
                 loaded = self.stop is not None and self.stop.loaded
                 info = self.stop.info if self.stop is not None else None
                 base.update(sl_loaded=loaded, current_sl=info.trigger_px if info else None)
+            if self.kind == "alert" and self.alert is not None:
+                base.update(alert=self.alert.to_dict())
         elif self.mode in ("confirm", "sending") and self.armed is not None:
             a = self.armed
             base.update(
@@ -394,3 +439,4 @@ class _ArmCtx:
     trading: bool
     size_decimals: int | None
     precheck: Precheck | None
+    watch: bool = False

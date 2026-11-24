@@ -30,7 +30,18 @@ export interface Position {
   leverage_type: string
 }
 
-export type MenuKind = 'actions' | 'sl'
+export type MenuKind = 'actions' | 'sl' | 'alert'
+
+/** A liquidation-distance alert from the backend risk engine (risk.py). */
+export interface AlertInfo {
+  coin: string
+  side: Side
+  size: number
+  liq_px: number
+  liq_dist_pct: number
+  mark: number
+  threshold_pct: number
+}
 
 export interface MenuScreen {
   mode: 'menu'
@@ -44,6 +55,8 @@ export interface MenuScreen {
   /** kind "sl": the position's current stop-loss, once the exchange answered */
   sl_loaded?: boolean
   current_sl?: number | null
+  /** kind "alert": what fired (items: Move SL / Close 50% / Close all / Snooze 5m) */
+  alert?: AlertInfo
 }
 
 interface OrderScreenBase {

@@ -23,6 +23,7 @@ from tripwire.exchanges.hyperliquid import HyperliquidAdapter
 from tripwire.hl.feed import HyperliquidFeed
 from tripwire.orders import OrderService
 from tripwire.policy import KillSwitch, PolicyGuard, PolicyLimits
+from tripwire.risk import AlertService, RiskEngine
 from tripwire.state import MarketState
 from tripwire.telegram_bot import BotServices, TelegramBot, build_application
 from tripwire.ws import ClientHub, make_ws_router
@@ -117,6 +118,19 @@ def create_app(
     )
     feed = HyperliquidFeed(settings.hl_api_url, state) if run_feed else None
     hub = ClientHub()
+    bot.owner_id = settings.telegram_owner_id
+    alerts = AlertService(
+        RiskEngine(
+            threshold_pct=settings.alert_liq_pct,
+            hysteresis_pct=settings.alert_hysteresis_pct,
+            snooze_s=settings.alert_snooze_s,
+        ),
+        adapter,
+        glasses=hub.raise_alert,
+        notifier=bot,
+        store=store,
+    )
+    bot_services.alerts = alerts
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -124,7 +138,9 @@ def create_app(
         await asyncio.to_thread(kill_switch.load)
         if kill_switch.engaged:
             log.warning("Kill switch is ON (%s): only reduce-only orders", kill_switch.source)
+        await asyncio.to_thread(alerts.load_threshold)
         feed_task = asyncio.create_task(feed.run(), name="hl-feed") if feed else None
+        alert_task = asyncio.create_task(alerts.run(), name="risk-alerts")
         warm_task = asyncio.create_task(adapter.start(), name="exchange-warm-up")
         await bot.start()
         log.info(
@@ -141,8 +157,9 @@ def create_app(
         try:
             yield
         finally:
-            warm_task.cancel()
-            await asyncio.gather(warm_task, return_exceptions=True)
+            for task in (warm_task, alert_task):
+                task.cancel()
+            await asyncio.gather(warm_task, alert_task, return_exceptions=True)
             await bot.stop()
             if feed_task:
                 feed_task.cancel()
@@ -165,6 +182,7 @@ def create_app(
             hub=hub,
             guard=guard,
             orders=orders,
+            on_snooze=alerts.engine.snooze,
             min_interval_s=min_interval_s,
             heartbeat_s=heartbeat_s,
         )
@@ -194,6 +212,10 @@ def create_app(
                 "mode": "two-tap confirm; every order through the policy guard",
             },
             "policy": guard.status(),
+            "alerts": {
+                **alerts.engine.status(asyncio.get_running_loop().time()),
+                "last": alerts.last_delivery,
+            },
             "telegram": {"status": bot.status, "detail": bot.detail},
             "ws_clients": hub.count,
         }
@@ -203,5 +225,6 @@ def create_app(
     app.state.adapter = adapter
     app.state.hub = hub
     app.state.guard = guard
+    app.state.alerts = alerts
     app.state.kill_switch = kill_switch
     return app

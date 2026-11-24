@@ -908,3 +908,66 @@ Cases the guard catches, with the reason shown in place of a confirm screen:
     cancelled, `order_log.kind = stop`).
   - The DB migration.
 - Plugin: 32 tests (+2).
+
+### 18. Liquidation alerts: risk engine, glasses RISK screen, Telegram DM fallback (item 2)
+
+**Engine (`risk.py`, `RiskEngine`, pure).** It runs per position (coin **and** side), on
+`liq_dist_pct`, which is measured from markPx. A position whose mark is still the mid fallback
+is skipped, because liquidation runs on mark.
+
+| Event | Rule |
+|---|---|
+| fire | distance ≤ `ALERT_LIQ_PCT` (5 %) **and** armed **and** not snoozed |
+| re-arm | distance ≥ threshold + `ALERT_HYSTERESIS_PCT` (1 %). A price wobbling 4.9 ↔ 5.2 % alerts **once** (tested) |
+| snooze | `ALERT_SNOOZE_S` = 300 s. Afterwards it fires again if still inside |
+| threshold change | re-arms everything, so a position already inside the new threshold alerts at once |
+| position closed | its state is forgotten |
+
+**Service (`AlertService`):**
+- It consumes **`adapter.stream_positions()`**, the item-7 interface, used for real here. It
+  re-evaluates on every update and at least every `TICK_S` = 5 s (for snooze expiry without a
+  price move).
+- Delivery: if glasses are connected, `ClientHub.raise_alert` puts the RISK screen on every
+  client. If **none are connected, it sends a Telegram DM to `TELEGRAM_OWNER_ID`**
+  (`TelegramBot.send_owner`). With no bot or no owner it logs "nowhere".
+- `/healthz → alerts` shows the threshold, hysteresis, snooze, `fired`, positions `inside` the
+  threshold, `snoozed` positions, and the `last` delivery with its target.
+
+**Threshold at runtime:** the new owner-only `/threshold` command (`/threshold 8`) is stored in
+the SQLite `kv` table and reloaded at startup. The exit check's "lowering the threshold" is this
+command, or `ALERT_LIQ_PCT`. A higher percentage alerts earlier.
+
+**Glasses (`ActionFlow.raise_alert`, menu kind `alert`):**
+- Header `▲ RISK  ETH-PERP LONG 0.50`, then `Liq 2,980  3.9% from mark (<5%)`, then
+  **Move SL / Close 50% / Close all / Snooze 5m**.
+- These reuse the existing machinery:
+  - Move SL opens the §17 SL submenu, and its Back returns to the alert.
+  - Close 50% / Close all arm the same two-tap confirm. A swipe-cancel returns to the alert.
+  - Snooze → `Outcome.snooze` → `risk.snooze()` → HUD, with ack "alert snoozed 5 min".
+- **An alert never hijacks a confirm or an order in flight.** It waits (`pending_alert`) and
+  appears as soon as that screen is left.
+- In WATCH mode the alert still shows (informational). Order items answer "Watch only - not your
+  account, nothing sent"; Snooze works.
+
+**Glyph:** the glasses text has been ASCII-only since Day 1. `▲` (U+25B2, `RISK_GLYPH` in
+`hud.ts`) is now the single allowed exception, because the brief asked for it. `fit()` still
+turns every other non-ASCII character into `?`. Whether it renders is checked in the simulator in
+§20; if it doesn't, the constant becomes `/!\`.
+
+**Telegram DM text:** `▲ RISK  ETH-PERP LONG 0.5` / `Liquidation 1,420 is 4.2% from mark 1,482
+(alert at 5%).` / "Glasses not connected - open Tripwire to act (Move SL / Close), or send
+/status."
+
+**Checks:** **199 backend tests pass** (+18, new `test_alerts.py`):
+- Engine: fire once, hysteresis re-arm, wobble = one alert, snooze, mark-only, threshold
+  re-arm, per coin+side.
+- Delivery: glasses vs DM vs nowhere; the DM text; threshold persistence; the run loop reacts
+  to stream updates.
+- Flow: alert menu, waits for a confirm, snooze, alert → confirm → cancel back, Move SL → Back
+  to the alert, WATCH informational.
+- **End to end** via `/ws`:
+  - Moving markPx to 3100 (liq 2980 = 3.9 %) puts the alert on the connected client, and Snooze
+    works.
+  - **With no client, the same move produces a DM** (fake notifier).
+
+Plugin: 33 tests (RISK screen; `fit` keeps only `▲`).

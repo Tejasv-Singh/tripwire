@@ -18,6 +18,7 @@ import asyncio
 import contextlib
 import logging
 import secrets
+from collections.abc import Callable
 from typing import Any, Literal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -36,6 +37,7 @@ from tripwire.hud import (
 )
 from tripwire.orders import Order, OrderResult, OrderService
 from tripwire.policy import Decision, PolicyGuard
+from tripwire.risk import Alert
 from tripwire.state import MarketState
 
 log = logging.getLogger(__name__)
@@ -87,6 +89,13 @@ class ClientHub:
     def count(self) -> int:
         return len(self.sessions)
 
+    def raise_alert(self, alert: Alert) -> int:
+        """Put the RISK screen on every connected client. Returns how many got it."""
+        for session in list(self.sessions):
+            session.flow.raise_alert(alert)
+            session.wake()
+        return len(self.sessions)
+
 
 def make_ws_router(
     *,
@@ -97,6 +106,7 @@ def make_ws_router(
     hub: ClientHub,
     guard: PolicyGuard,
     orders: OrderService,
+    on_snooze: Callable[[str, str, float], None] | None = None,
     min_interval_s: float = MIN_INTERVAL_S,
     heartbeat_s: float = HEARTBEAT_S,
 ) -> APIRouter:
@@ -274,6 +284,8 @@ def make_ws_router(
                 spawn(session, run_order(ws, session, out.execute), "order")
             if out.fetch_stop is not None:
                 spawn(session, load_stop(session, out.fetch_stop), "stop-lookup")
+            if out.snooze is not None and on_snooze is not None:
+                on_snooze(out.snooze[0], out.snooze[1], loop.time())
             log.info(
                 "intent %s from %s -> mode=%s index=%d/%d%s",
                 intent.action,

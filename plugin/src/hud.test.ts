@@ -42,7 +42,7 @@ function assertFits(text: string): void {
   expect(lines.length).toBeLessThanOrEqual(MAX_LINES)
   for (const l of lines) {
     expect(l.length, `too long: "${l}"`).toBeLessThanOrEqual(MAX_COLS)
-    expect(l).toMatch(/^[\x20-\x7E]*$/) // printable ASCII only
+    expect(l).toMatch(/^[\x20-\x7E▲]*$/) // printable ASCII + the one RISK_GLYPH
   }
 }
 
@@ -205,6 +205,26 @@ describe('action screens', () => {
       '----------------------------------------',
       'tap: SEND  swipe/2x: cancel',
     ])
+  })
+
+  it('renders the RISK alert screen with its four actions', () => {
+    const alert: UiState = {
+      mode: 'menu', kind: 'alert', coin: 'ETH', items: ['Move SL', 'Close 50%', 'Close all', 'Snooze 5m'],
+      cursor: 0, trading: true, note: null,
+      alert: { coin: 'ETH', side: 'LONG', size: 0.5, liq_px: 2980, liq_dist_pct: 3.87, mark: 3100, threshold_pct: 5 },
+    }
+    const lines = at(alert).split('\n')
+    expect(lines.slice(1, 7)).toEqual([
+      '▲ RISK  ETH-PERP LONG 0.50',
+      'Liq 2,980  3.9% from mark (<5%)',
+      '> Move SL',
+      '  Close 50%',
+      '  Close all',
+      '  Snooze 5m',
+    ])
+    expect(lines.at(-1)).toBe(FOOTERS.menu)
+    assertFits(at(alert))
+    expect(fit('▲ RISK • x')).toBe('▲ RISK ? x') // only the RISK glyph survives
   })
 
   it('renders the Move SL submenu with the current stop (or that it is loading)', () => {

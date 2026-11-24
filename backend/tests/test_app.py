@@ -254,4 +254,4 @@ async def test_bot_with_empty_token_is_disabled() -> None:
 
 def test_bot_application_registers_handlers_offline() -> None:
     app = build_application("123456:TEST-TOKEN-not-real", store=None)
-    assert len(app.handlers[0]) == 6  # start, kill, unkill, business conn/msg, forward
+    assert len(app.handlers[0]) == 7  # start, kill, unkill, threshold, business x2, forward
