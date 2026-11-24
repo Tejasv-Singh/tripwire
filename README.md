@@ -2,22 +2,38 @@
 
 **A trading-session risk co-pilot for Even Realities G2 smart glasses.**
 Tripwire puts your Hyperliquid **testnet** positions in the corner of your eye: size, entry,
-live uPnL and how far you are from liquidation. You flip between positions with a swipe on the
-ring or temple. A Telegram Business bot handles messages and, later, alerts.
+live uPnL, ROE and how far you are from liquidation. You flip between positions with a swipe on
+the ring or temple. A tap opens a menu that can **cut a position by 25 / 50 / 100 %**: reduce-only,
+and only after a second, deliberate tap. A Telegram Business bot handles messages and, later,
+alerts.
 
 Built for the **Heads Up** hackathon. Tracks: **Crypto & DeFi** and **Messaging**.
 
 ```
 TRIPWIRE            TESTNET      09:05
 ETH-PERP LONG 0.50 @ 3,412  5x
-uPnL +$41.20 (+2.4%)
+uPnL +$41.20 (+2.4%)  ROE +12.1%
 Liq 2,980  12.7% away
 ----------------------------------------
 tap: actions  swipe: next  2x: exit
 ```
 
-> **Status: Day 1 scaffold.** The HUD is read-only and live, and the bot skeleton runs. No
-> orders are placed yet. With no account configured, the HUD shows the live ETH mark price.
+Tap, pick "Close 50%", and tap again within 5 seconds:
+
+```
+TRIPWIRE            TESTNET      09:05
+CONFIRM  Close 50%  ETH-PERP LONG
+SELL 0.25 ETH  reduce-only IOC
+at ~3,494.4 mark, max 5% slippage
+Tap again within 5s to SEND.
+----------------------------------------
+tap: SEND  swipe/2x: cancel
+```
+
+> **Status: Day 2.** The HUD is live, the Telegram bot runs, and the actions menu with two-tap
+> reduce-only closes is built and tested end to end in the simulator (against a fake exchange).
+> It hasn't placed a real testnet order yet, because that needs a funded testnet account and an
+> agent key. With no account configured, the HUD shows the live ETH mark price.
 
 ## How it works
 
@@ -55,7 +71,10 @@ if you want to use real glasses.
      `python -c "import secrets; print(secrets.token_urlsafe(12))"`.
    - `HL_ACCOUNT_ADDRESS` is optional. Leave it empty to see only the ETH price.
    - `TELEGRAM_BOT_TOKEN` is optional. Leave it empty and the bot is skipped.
-   - `HL_AGENT_KEY` and `ANTHROPIC_API_KEY` are not used yet.
+   - `HL_AGENT_KEY` is optional. Without it (or without `HL_ACCOUNT_ADDRESS`) the menu still
+     opens, but trading is off and nothing can be sent. See
+     [Trading on testnet](#trading-on-testnet-optional).
+   - `ANTHROPIC_API_KEY` is not used yet.
 3. **Configure the plugin.** Copy `plugin/.env.example` to `plugin/.env.local`. Set
    `VITE_BACKEND_URL` to your HTTPS backend origin, and `VITE_PAIRING_CODE` to the same value as
    `PAIRING_CODE`. The pairing code is only read in development builds.
@@ -75,8 +94,8 @@ if you want to use real glasses.
    npm run sim            # 4. Even Hub simulator pointed at the Vite server
    ```
    The simulated glasses show the live ETH mark price. It changes as testnet ETH moves, and the
-   clock in the header keeps ticking. Swipe in the simulator for next/prev, click for "actions",
-   and double-click to exit.
+   clock in the header keeps ticking. In the simulator, swipe for next/prev and click (tap) for
+   the actions menu. Double-click exits from the HUD and backs out of any other screen.
 7. **Run on real glasses:** from `plugin/`, run `npx evenhub qr --url http://<your-LAN-IP>:5173`
    and scan the code with the Even App. The phone must be on the same Wi-Fi. To build an
    installable package, run `npm run plugin:pack` to produce `plugin/tripwire.ehpk`.
@@ -84,6 +103,35 @@ if you want to use real glasses.
 **Checks:** `npm test` runs the backend pytest suite and the plugin vitest suite.
 `npm run check` also runs ruff, strict mypy and tsc. `curl http://127.0.0.1:8000/healthz` shows
 the feed and bot status.
+
+### Trading on testnet (optional)
+
+Closing from the glasses needs a **funded Hyperliquid testnet account** and an **API (agent)
+wallet** that the account has approved. The agent can place orders for the account, but it can't
+withdraw.
+
+1. Open [app.hyperliquid-testnet.xyz](https://app.hyperliquid-testnet.xyz) with your main wallet
+   and get testnet USDC from the faucet. Your account must be eligible for it.
+2. On the **API** page, generate an API wallet and **authorize** it. Copy its private key once.
+   It is the agent key, not your main wallet key.
+3. In `.env`, set `HL_ACCOUNT_ADDRESS` to your **main** account address (not the agent's) and
+   `HL_AGENT_KEY` to the agent's private key. Restart the backend.
+4. The backend log shows `Trading ready on testnet: agent wallet 0x1234...abcd`, and `/healthz`
+   shows `trading.status` = `ready`.
+5. Open a small position on the testnet site. It shows up on the glasses within a few seconds.
+   Tap, swipe to `Close 25%`, tap, check the confirm screen, then tap again within 5 s.
+
+On the glasses:
+
+| Screen | Tap | Swipe | Double tap |
+|---|---|---|---|
+| HUD | open the actions menu | next / previous position | exit the app |
+| Menu | choose (Close 25 / 50 / 100 %, Back) | move the cursor | back to the HUD |
+| Confirm | **send** (between 0.3 s and 5 s after choosing) | cancel, back to the menu | cancel, back to the HUD |
+| Result | back to the HUD (also after 8 s) | same | same |
+
+Every confirmed close is a reduce-only IOC order at mid ± 5 %. It is written to the SQLite
+`order_log` table (`backend/data/tripwire.sqlite3`) along with Hyperliquid's answer.
 
 ### Telegram bot (optional)
 
@@ -116,8 +164,14 @@ and never less than Telegram's `retry_after`. Only a rejected token stops it for
 | `/healthz` returns an HTML page through ngrok | That's ngrok's browser warning. The plugin sends `ngrok-skip-browser-warning` on every fetch. If the WebSocket gets HTML too, use a Cloudflare named tunnel instead. |
 | Backend exits with `TestnetGuardError` | `HL_API_URL` is not exactly `https://api.hyperliquid-testnet.xyz`. That's on purpose. |
 | Log says `Telegram bot not up yet (TimedOut …)` or `(RetryAfter …)` | Telegram is slow or throttling the bot. Leave the backend running, because it retries by itself. Every restart or manual test call makes another request and extends the throttle. A brand-new bot took about 18 minutes to get through (9 attempts) on the first day. If it's still failing after about 30 minutes, `/revoke` the token in BotFather and put the new one in `.env`. |
-| Log shows `Exception happened while polling for updates … httpx.ReadError` with a long traceback | Harmless. Telegram dropped the long-poll connection and the library reconnects by itself. `/healthz` → `telegram.status` stays `running`. |
+| Log shows `Telegram polling hiccup (NetworkError: httpx.ReadError …) - reconnecting automatically` | Harmless. Telegram dropped the long-poll connection and the library reconnects by itself. `/healthz` → `telegram.status` stays `running`. (Before Day 2 this printed as a 40-line `Exception happened while polling for updates` traceback.) |
 | `/healthz` says `telegram: error … InvalidToken` | The token in `.env` is wrong (a missing character or an extra space). Fix it and restart. |
+| Menu says `Trading off: read-only (no agent key)` | `HL_ACCOUNT_ADDRESS` and `HL_AGENT_KEY` must both be set in `.env`. Restart the backend after editing `.env`. |
+| Backend won't start: `HL_AGENT_KEY must be empty or a 64-hex-char private key` | The value isn't a private key. Copy the agent's private key (64 hex characters, `0x` optional), not its address. |
+| Result: `User or API Wallet ... does not exist` | The agent wallet isn't authorized for that account on **testnet**, or `HL_ACCOUNT_ADDRESS` is the agent's address instead of the main account's. |
+| Result: `Order could not immediately match ...` | The IOC order found no liquidity within 5 % of mid, which is common on thin testnet books. Nothing was filled; try again. |
+| Result: `No reply in 25s - CHECK positions` | Hyperliquid didn't answer in time. The order **may still have gone through**, so check the position before you try again. |
+| `/healthz` shows `trading.status` = `error` | The backend couldn't load Hyperliquid's coin list at startup. `trading.detail` says why. The first close tries again. |
 | `evenhub-simulator` not found | `npm run sim` calls the simulator's `bin/index.js` directly. If you run it yourself, `npm rebuild @evenrealities/evenhub-simulator` restores the link. |
 
 ## Safety rules
@@ -125,19 +179,23 @@ and never less than Telegram's `retry_after`. Only a rejected token stops it for
 1. **Testnet only.** The backend refuses to start unless the Hyperliquid URL is exactly
    `hyperliquid.utils.constants.TESTNET_API_URL`. The check runs at startup and again inside the
    feed. There is no mainnet switch.
-2. **Agent key only.** Trading (from Day 2) will sign with a Hyperliquid **API/agent wallet**
-   key (`HL_AGENT_KEY`), never your main wallet key. Agent wallets can't withdraw funds.
-3. **Reduce-only by default.** Actions triggered from the glasses will be `reduce_only` orders
-   that can shrink or close a position but never open or grow one.
-4. **Two-tap confirm.** Every risk action needs a second, deliberate tap on a confirmation
-   screen before anything is sent.
+2. **Agent key only.** Orders are signed with a Hyperliquid **API/agent wallet** key
+   (`HL_AGENT_KEY`), never your main wallet key. Agent wallets can't withdraw funds. Only the
+   agent's public address is ever logged.
+3. **Reduce-only.** The only order the glasses can send is a `reduce_only` IOC close of 25, 50
+   or 100 % of a position. It can shrink or close a position but never open, grow or flip one.
+   No menu item opens a position.
+4. **Two-tap confirm.** The first tap shows the exact order (side, size, price, slippage). Only
+   a second tap 0.3–5 s later sends it, and only if the position is still open on the same side.
+   The backend enforces this, so a buggy or replayed client can't skip it.
 5. **No advice.** Tripwire shows numbers you can verify (position, uPnL, liquidation distance).
    It doesn't tell you what to trade. Nothing here is financial advice.
 6. **Keys stay on the backend.** The plugin never holds API keys. It only knows the backend URL
    and a pairing code, and the dev pairing code is stripped from production builds.
 
-Day 1 enforces rules 1, 5 and 6 in code. Rules 2–4 are design commitments for the order flow,
-which doesn't exist yet. No order path is built.
+All six rules are enforced in code as of Day 2: `config.py` (testnet guard, key validation),
+`trading.py` (reduce-only closes only), `actions.py` (two-tap confirm) and `hud.ts` (numbers
+only). Tests cover each one (`backend/tests/test_actions.py`, `test_trading.py`, `test_app.py`).
 
 ## Privacy
 

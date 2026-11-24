@@ -437,4 +437,154 @@ the `getUpdates` long-poll connection was dropped, and PTB's own `network_retry_
 straight away. `/healthz` stayed `running` and both tests passed after these errors. Possible
 follow-up: pass `error_callback=` to `start_polling()` so this prints as one warning line. That
 edits `telegram_bot.py`, which triggers a dev-server reload and a new `getMe`, so do it at a
-quiet moment.
+quiet moment. (Done in §12.)
+
+---
+
+## 2026-11-24 · Day 2 (afternoon)
+
+### 12. ROE, actions menu, two-tap reduce-only closes (protocol v2)
+
+Scope came from the "Next" list in `docs/architecture.md`: ROE next to uPnL %, an actions menu
+on tap, and reduce-only orders with the agent key behind a two-tap confirm. Risk alerts are still
+to do. There's no funded testnet account or agent key yet, so everything was built and tested
+against a **fake exchange**, and no request was sent to Hyperliquid's `/exchange`.
+
+**ROE (`hl/positions.py`, `roe_pct`).** `roe_pct = upnl / (size × entry / leverage) × 100`,
+which equals `upnl_pct × leverage`.
+- This is return on **initial margin**, the same definition as Hyperliquid's own
+  `returnOnEquity`. Check: in the test fixture, 41.2 / (1,706 / 5) = 0.1207 = HL's value.
+- Not `marginUsed`: on cross positions `marginUsed` = positionValue / leverage moves with the
+  price, so ROE would drift even with flat PnL.
+- Isolated positions with extra margin added are approximated the same way.
+- `roe_pct` is null when leverage is 0/unknown.
+- It uses our live `upnl` (on mid), so it moves with the HUD. The HUD shows
+  `uPnL +$41.20 (+2.4%)  ROE +12.1%`.
+
+**Who owns the menu: the backend.** `actions.py` has one `ActionFlow` per WebSocket client, with
+the screens hud → menu → confirm → sending → result. The plugin only draws `ui` from each frame.
+- Why: the two-tap confirm is a safety rule, so it has to hold even for a buggy or replayed
+  client. The only path to an order is `tap` (arm) then `tap` 0.3–5 s later.
+- Timings: `CONFIRM_WINDOW_S` = 5 s, `MIN_CONFIRM_GAP_S` = 0.3 s (a bounced tap isn't a
+  confirm), `RESULT_HOLD_S` = 8 s.
+- Timers use `loop.call_later` with a token, so a stale timer can't change a newer screen.
+- While a menu is open the client is **locked to that coin** (`hud.resolve_index`). A new
+  position sorting in front can't swap what the menu is about, and if the coin closes, `position`
+  becomes null instead of another coin.
+
+**Menu items:** Close 25 %, Close 50 %, Close 100 %, Back (`MENU`). No item opens, adds to or
+flips a position.
+
+**Orders (`trading.py`).** `HyperliquidExecutor.close()` calls the SDK's
+`Exchange.market_close(coin, sz, None, SLIPPAGE=0.05)`. What that call does (read from the 0.24.0
+source):
+- It reads the **live** `user_state` for `account_address`, so the side always comes from the
+  live position.
+- It sends an IOC limit at mid × (1 ± 5 %) with `reduce_only=True` hard-coded.
+- It returns `None` if there's no position for the coin, which we show as "No open position".
+- Signing picks the chain with `base_url == MAINNET_API_URL`, so our testnet URL signs for
+  testnet.
+
+How sizes are chosen:
+- **Partial closes** (25/50 %) are rounded **down** to the coin's `szDecimals`, taken from the
+  SDK's `info.asset_to_sz_decimals[info.name_to_asset(coin)]`. The SDK's `float_to_wire` raises
+  on more than 8 decimals, and the exchange rejects sizes that aren't a multiple of the lot.
+- The confirm screen shows exactly that rounded size, and tap 2 sends
+  `min(shown, live size)`, never more than what was shown.
+- **Close 100 %** sends `sz=None`, which makes the SDK close the whole live size.
+- A partial that rounds to 0 is refused before anything is sent.
+
+Other executor behaviour:
+- Building `Exchange` makes two blocking HTTP calls (meta and spotMeta). It runs in a thread
+  as a background **warm-up** at startup, so exact sizes are ready before the first menu.
+- `/healthz` → `trading.status` is `off`, `warming`, `ready` or `error`. A failed warm-up isn't
+  fatal: the first close retries it.
+- One order at a time (`asyncio.Lock`). The whole call has a 25 s timeout, and the requests
+  timeout is 10 s. A timeout says **"No reply in 25s - CHECK positions"**, because the worker
+  thread may still deliver the order.
+- Replies are parsed by `parse_order_response`: `filled` (totalSz/avgPx/oid), `resting`,
+  `{"error"}` → `rejected`, `status: err` → `rejected`. SDK exceptions use `ClientError.error_message`.
+  Messages are trimmed to 120 characters, and the plugin word-wraps them to 3 lines.
+- The order task is **not cancelled if the glasses disconnect**, because the order may already be
+  out. The result still goes to SQLite `order_log` (new table: ts, client, coin, side, fraction,
+  size, ok, status, filled_size, avg_px, oid, message) and, if still connected, to a new `order`
+  frame.
+
+**Agent key handling (`config.py`, `trading.py`).**
+- `HL_AGENT_KEY` must be empty or 64 hex characters (`0x` optional). The validation error never
+  echoes the value.
+- `Settings.trading_enabled` needs **both** `HL_ACCOUNT_ADDRESS` and `HL_AGENT_KEY`; otherwise
+  `DisabledExecutor` is used. The menu still opens, but picking a close shows "Trading off", never
+  a confirm.
+- The key is turned into an `eth_account` signer once, and only `agent_address` (public) is kept
+  as an attribute and logged as `0x1234...abcd`. A test checks that no attribute's repr contains
+  the key.
+- Testnet is checked again: `assert_testnet` runs in the executor's constructor, and the built
+  `Exchange.base_url` is re-checked before the first order. That makes three places, with
+  `create_app` and the feed.
+
+**Protocol v2** (`docs/ws-protocol.md` has the full reference):
+- Intents are `next | prev | tap | back`; v1's `actions` now gets `bad_message`.
+- `hud` frames gain `ui` and `trading`, `position` gains `roe_pct`, and `hello` gains `trading`.
+- `ack` gains `mode` and can be `ok: false` with a `note`.
+- There's a new `order` frame.
+
+**Plugin.**
+- `input.ts`: `commandFromEvent(event, mode)`. A double tap **exits on the HUD and sends `back`
+  everywhere else**, so two double taps always leave the app. A tap is always `tap`.
+- `main.ts` passes `currentMode(frame, linkView)`, which is always `hud` while the link is down,
+  so a stale menu frame can't stop you exiting.
+- `hud.ts` draws the menu, confirm, sending and result screens, with a footer per screen
+  (`FOOTERS`).
+- The body is capped at 6 lines, so the footer can't be pushed off: header + 6 + separator +
+  footer = 9 lines.
+- On the confirm screen, the verb is SELL when closing a long and BUY when closing a short. It
+  shows `ALL` for 100 % and `~` when the size isn't rounded yet. New helpers: `fmtQty` (all
+  decimals, up to 8) and `wrap`.
+
+**Telegram polling noise.** PTB's `Updater` logs every `getUpdates` failure via
+`default_error_callback`, which calls `_LOGGER.exception`: an ERROR with a 40-line traceback.
+`start_polling(error_callback=on_polling_error)` replaces that with one warning:
+`Telegram polling hiccup (NetworkError: …) - reconnecting automatically`. The callback must be a
+plain function, because PTB rejects coroutines.
+
+**Checks:**
+- Backend: ruff, ruff format and strict mypy are clean; **110 tests pass** (was 65).
+- New backend tests:
+  - `test_actions.py`: 20 tests covering every transition, the bounce, expiry, a stale timer,
+    a side flip between taps, the cap at the live size, trading off, and a partial rounding to 0.
+  - `test_trading.py`: rounding, reply parsing, mainnet refusal, a non-testnet Exchange, SDK
+    exceptions, warm-up failure, and the key not being kept.
+  - Two-tap end-to-end and expiry through the real `/ws` in `test_app.py`, plus `order_log`
+    round-trip and the one-line polling warning.
+- Plugin: tsc is clean, **28 tests pass** (was 17), and `npm run build` works.
+
+**Simulator check (2026-11-24 ~16:03 IST).**
+- Setup: a throwaway backend on :8010 with **live testnet ETH prices**, a fake 0.5 ETH long
+  (entry 1,700, liq 1,420, 5x) and a fake executor that "fills" after 1 s and shrinks the fake
+  position. Vite ran on :5174 (`VITE_BACKEND_URL=http://127.0.0.1:8010`), and the simulator was
+  driven through its automation API (`--automation-port 9898`). The scripts were kept out of the
+  repo.
+- The glasses showed, in order:
+  1. HUD with `uPnL -$7.52 (-0.9%)  ROE -4.4%` (= -0.9 % × 5).
+  2. The menu, with the cursor on `Close 50%` after a swipe down.
+  3. Confirm: `SELL 0.25 ETH  reduce-only IOC` / `at ~1,685.0 mark, max 5% slippage` /
+     `Tap again within 5s to SEND.`
+  4. `SENDING`.
+  5. `FILLED  Close 50%  ETH-PERP` / `Filled 0.25 @ 1684.9`.
+  6. Back on the HUD after 8 s with `ETH-PERP LONG 0.25`.
+  7. A second arm left alone for 6 s → menu with `Confirm expired - not sent`.
+  8. A double-click → back to the HUD.
+- The plugin console logged `ack tap -> confirm`, `ack tap -> sending`,
+  `ORDER ETH close 50%: filled - Filled 0.25 @ 1684.9` and `ack back -> hud`.
+
+**Side effect:** saving `backend/src` files reloaded the user's running `backend:dev` several
+times. Telegram reconnected without being throttled each time; at the end, `/healthz` showed
+`telegram: running @tripwire_g2_bot` and `trading: off` (no agent key).
+
+**Not verified yet:**
+- A real close on Hyperliquid testnet: it needs faucet funds, an authorized agent wallet, and an
+  open position. Setup steps are in the README, "Trading on testnet".
+- Real glasses.
+- Whether HL's testnet accepts reduce-only partials below its $10 minimum order value. If not,
+  the exchange's error message shows on the result screen.

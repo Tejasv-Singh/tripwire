@@ -2,7 +2,8 @@
 
 Tripwire is a trading-session risk co-pilot: live Hyperliquid **testnet** positions on Even
 Realities G2 glasses, navigated with ring/temple taps, plus a Telegram Business bot for messages
-and (later) alerts. Day-1 scope: read-only HUD + bot skeleton. No orders are placed yet.
+and (later) alerts. Day 1: read-only HUD + bot skeleton. Day 2: ROE, an actions menu on tap, and
+**reduce-only closes (25 / 50 / 100 %) behind a two-tap confirm**, signed with the agent key.
 
 ## Components
 
@@ -24,13 +25,15 @@ and (later) alerts. Day-1 scope: read-only HUD + bot skeleton. No orders are pla
  ┌─────────────────────────── laptop ─────┼───────────────────────────────────────────────┐
  │ backend/  FastAPI + uvicorn (Python 3.12, one asyncio event loop)                       │
  │   main.py   create_app(): testnet guard → state → feed task → bot → routes              │
- │   ws.py     /ws  (pairing, hud frames ≤ 2/s, heartbeats, intents)                       │
- │   hud.py    MarketState → JSON frame                                                    │
+ │   ws.py     /ws  (pairing, hud frames ≤ 2/s, heartbeats, intents → ActionFlow)          │
+ │   actions.py  per-client screen: hud → menu → two-tap confirm → sending → result         │
+ │   trading.py  reduce-only IOC closes ── POST /exchange (agent key) ──► HL TESTNET        │
+ │   hud.py    MarketState + ui → JSON frame                                               │
  │   state.py  MarketState (mids, marks, positions, listeners)                             │
  │   hl/feed.py      ── wss://api.hyperliquid-testnet.xyz/ws ──► Hyperliquid TESTNET       │
- │   hl/positions.py pure math: uPnL, uPnL %, liq distance                                 │
+ │   hl/positions.py pure math: uPnL, uPnL %, ROE, liq distance                            │
  │   telegram_bot.py ── long polling ──► api.telegram.org (Bot API)                        │
- │   db.py     SQLite: business_connections, intent_log (metadata only)                    │
+ │   db.py     SQLite: business_connections, intent_log, order_log (metadata only)         │
  └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -46,7 +49,28 @@ and (later) alerts. Day-1 scope: read-only HUD + bot skeleton. No orders are pla
    with `textContainerUpgrade` (one call in flight; newest text wins; unchanged text skipped).
 
 Input goes the other way: `onEvenHubEvent` → `input.ts` → `{"type":"intent","action":…}` →
-`ws.py` updates that client's selection, logs it to SQLite, sends `ack` + a fresh frame.
+`ws.py` hands it to that client's `ActionFlow`, logs it to SQLite, sends `ack` + a fresh frame.
+
+## Closing a position (Day 2)
+
+```
+ HUD ──tap──► MENU ──tap "Close 50%"──► CONFIRM ──tap (0.3–5 s later)──► SENDING ──► RESULT ──8 s / any input──► HUD
+  ▲            │ swipe: move cursor      │ swipe: cancel → MENU            │ executor.close()   │
+  └─2x/Back────┘                         │ 2x: cancel → HUD                │ (background task)  │
+                                         └ 5 s timer: "Confirm expired" → MENU                  └ order frame + order_log
+```
+
+- The **backend** owns this state machine (`actions.py`), one per WebSocket client. The plugin
+  draws `ui` from each frame and maps input by the current screen: double tap = exit on the HUD,
+  back everywhere else (`input.ts`).
+- Tap 1 only *arms*: it freezes the exact order (coin, side, size rounded down to `szDecimals`,
+  mark at the time) and shows it. Tap 2 sends it, after re-checking that the position is still
+  open on the same side and capping a partial close at the live size.
+- `trading.py` sends it with `Exchange.market_close(coin, sz, slippage=5%)` from
+  hyperliquid-python-sdk: an IOC limit at mid ± 5 % with `reduce_only=True` hard-coded, the side
+  taken from the live position. One order at a time (`asyncio.Lock`), 25 s overall timeout.
+- The order task is not cancelled if the glasses disconnect; its result is still logged to
+  `order_log`.
 
 ## Price sources
 
@@ -77,6 +101,11 @@ exists on the API — see `docs/BUILD_LOG.md` §0/§2.
 | App backgrounded | `FOREGROUND_ENTER_EVENT` | force reconnect immediately |
 | Wrong pairing code | close code 4401 | stop retrying, HUD says "Pairing code rejected" |
 | Telegram token missing/invalid | at startup | bot skipped, backend keeps running, `/healthz` says why |
+| Telegram slow / 429 at startup | `TimedOut` / `RetryAfter` | retried in the background, 5 s doubling to 300 s, never below `retry_after` |
+| Telegram long poll dropped | `NetworkError` while polling | PTB reconnects; one warning line (`on_polling_error`) |
+| Hyperliquid `/exchange` unreachable at startup | trading warm-up fails | `trading.status = error`; the first close tries again |
+| Order gets no reply in 25 s | `asyncio.wait_for` timeout | result "No reply in 25s - CHECK positions" (it may still have gone through) |
+| Position closed/flipped between the two taps | re-check on tap 2 | "Position changed - NOT sent" |
 
 ## Security & safety boundaries
 
@@ -87,8 +116,14 @@ exists on the API — see `docs/BUILD_LOG.md` §0/§2.
   third-party calls (Hyperliquid, Telegram, Anthropic) are made by the backend.
 - **Pairing code** gates `/ws`; it is redacted from backend logs; the dev copy in
   `plugin/.env.local` is stripped from production builds.
-- **Agent key only** (Day 2+): signing will use an API/agent wallet key (`HL_AGENT_KEY`), never the
-  main wallet key. Agent wallets can trade but cannot withdraw.
+- **Agent key only**: orders are signed with an API/agent wallet key (`HL_AGENT_KEY`), never the
+  main wallet key. Agent wallets can trade but cannot withdraw. The key is validated (64 hex
+  chars) without being echoed, turned into a signer once, and only the agent's public address
+  is logged. Trading is on only when both `HL_ACCOUNT_ADDRESS` and `HL_AGENT_KEY` are set.
+- **Reduce-only, two-tap**: the only order type is a reduce-only IOC close; the menu has no
+  open/add/flip item; the confirm is enforced server-side (see "Closing a position").
+- **Testnet, three times**: `assert_testnet` at app creation, in the feed, and when the executor is
+  built; the executor also re-checks the SDK object's `base_url` before its first order.
 - **Privacy**: Telegram Bot API only (no userbot / MTProto); the bot only sees chats the user
   explicitly connects via Telegram Business; message text is never logged or stored.
 
@@ -100,6 +135,9 @@ exists on the API — see `docs/BUILD_LOG.md` §0/§2.
 | Backend URL + dev pairing code for the plugin | `plugin/.env.local` (template `plugin/.env.example`) |
 | Network whitelist, permissions, package id, versions | `plugin/app.json` |
 | Throttle / heartbeat | `backend/src/tripwire/ws.py` |
+| Menu items, confirm window, bounce gap, result hold | `MENU`, `CONFIRM_WINDOW_S`, `MIN_CONFIRM_GAP_S`, `RESULT_HOLD_S` in `backend/src/tripwire/actions.py` |
+| Slippage cap, order timeouts | `SLIPPAGE`, `HTTP_TIMEOUT_S`, `ORDER_TIMEOUT_S` in `backend/src/tripwire/trading.py` |
+| Footers / screen text | `FOOTERS` and the `*Lines()` functions in `plugin/src/hud.ts` |
 | Feed ping / staleness / backoff | `backend/src/tripwire/hl/feed.py` |
 | HUD layout and limits | `plugin/src/hud.ts` |
 | Swipe direction | `SWIPE_TO_ACTION` in `plugin/src/input.ts` |
@@ -107,7 +145,6 @@ exists on the API — see `docs/BUILD_LOG.md` §0/§2.
 
 ## Next (not built yet)
 
-- Day 2: ROE on margin next to uPnL % (`TODO(Day 2)` in `hl/positions.py`); actions menu on tap;
-  reduce-only orders via the SDK's `Exchange` with the agent key, behind a two-tap confirm.
+- First live close on a funded testnet account (needs the faucet + an approved agent wallet).
 - Risk alerts (liq distance thresholds on mark) to glasses + Telegram.
 - Day 6: per-module docs, decision log, how-to guide.
