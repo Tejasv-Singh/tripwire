@@ -71,6 +71,10 @@ export type ResultScreen = Extract<UiState, { mode: 'result' }>
 export interface TradingInfo {
   enabled: boolean
   status: TradingStatus
+  /** orders are built and signed but NOT sent (DRY_RUN=true) */
+  dry_run?: boolean
+  /** "hyperliquid" | "fake" (demo) | "bybit_demo" */
+  exchange?: string
 }
 
 export interface HudFrame {

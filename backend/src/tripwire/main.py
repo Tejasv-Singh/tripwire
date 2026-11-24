@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from functools import partial
 from typing import Any
@@ -18,13 +18,14 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from tripwire.config import Settings, assert_testnet
 from tripwire.db import Store
+from tripwire.exchanges.base import ExchangeAdapter
+from tripwire.exchanges.hyperliquid import HyperliquidAdapter
 from tripwire.hl.feed import HyperliquidFeed
 from tripwire.orders import OrderService
 from tripwire.policy import KillSwitch, PolicyGuard, PolicyLimits
 from tripwire.state import MarketState
 from tripwire.telegram_bot import BotServices, TelegramBot, build_application
-from tripwire.trading import DisabledExecutor, HyperliquidExecutor, OrderExecutor
-from tripwire.ws import make_ws_router
+from tripwire.ws import ClientHub, make_ws_router
 
 log = logging.getLogger("tripwire")
 
@@ -75,8 +76,9 @@ def create_app(
     run_bot: bool = True,
     min_interval_s: float = 0.5,
     heartbeat_s: float = 5.0,
-    executor: OrderExecutor | None = None,
+    make_adapter: Callable[[MarketState], ExchangeAdapter] | None = None,
 ) -> FastAPI:
+    """`make_adapter` swaps the exchange (tests / demo: FakeAdapter). Default: Hyperliquid."""
     settings = settings or Settings()  # type: ignore[call-arg]  # values come from .env
     assert_testnet(settings.hl_api_url)  # refuse to start on anything but testnet
     configure_logging(settings.log_level)
@@ -84,6 +86,16 @@ def create_app(
     state = MarketState(ref_coin="ETH", account=settings.stream_address, watch=settings.watch_mode)
     store = Store(settings.resolved_db_path)
     kill_switch = KillSwitch(settings.kill_switch, store)
+    if make_adapter is None:
+        adapter: ExchangeAdapter = HyperliquidAdapter(
+            state,
+            base_url=settings.hl_api_url,
+            account_address=settings.hl_account_address,
+            agent_key=settings.hl_agent_key.get_secret_value(),
+            watch=settings.watch_mode,
+        )
+    else:
+        adapter = make_adapter(state)
     guard = PolicyGuard(
         PolicyLimits(
             max_open_notional_usd=settings.max_open_notional_usd,
@@ -91,6 +103,7 @@ def create_app(
             daily_loss_limit_usd=settings.daily_loss_limit_usd,
         ),
         kill_switch,
+        pnl_source=adapter.realized_pnl_today,
         watch_only=settings.watch_mode,
     )
     orders = OrderService(guard)
@@ -101,21 +114,7 @@ def create_app(
         app_factory=partial(build_application, services=bot_services),
     )
     feed = HyperliquidFeed(settings.hl_api_url, state) if run_feed else None
-    if executor is None:
-        executor = (
-            HyperliquidExecutor(
-                base_url=settings.hl_api_url,
-                account_address=settings.hl_account_address,
-                agent_key=settings.hl_agent_key.get_secret_value(),
-            )
-            if settings.trading_enabled
-            else DisabledExecutor(
-                "watch only: WATCH_ADDRESS is someone else's account"
-                if settings.watch_mode
-                else "set HL_ACCOUNT_ADDRESS and HL_AGENT_KEY in .env"
-            )
-        )
-    trader: OrderExecutor = executor
+    hub = ClientHub()
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -124,16 +123,17 @@ def create_app(
         if kill_switch.engaged:
             log.warning("Kill switch is ON (%s): only reduce-only orders", kill_switch.source)
         feed_task = asyncio.create_task(feed.run(), name="hl-feed") if feed else None
-        warm_task = asyncio.create_task(trader.warm_up(), name="trading-warm-up")
+        warm_task = asyncio.create_task(adapter.start(), name="exchange-warm-up")
         await bot.start()
         log.info(
-            "Tripwire backend up: network=testnet positions=%s trading=%s telegram=%s",
+            "Tripwire backend up: network=testnet exchange=%s positions=%s trading=%s telegram=%s",
+            adapter.name,
             {
                 "account": "own account",
                 "watch": f"WATCH {state.account_short} (read-only)",
                 "price": "none (reference price only)",
             }[state.mode],
-            trader.status,
+            adapter.status if adapter.can_trade else f"off ({adapter.detail})",
             bot.status,
         )
         try:
@@ -159,7 +159,8 @@ def create_app(
             state=state,
             pairing_code=settings.pairing_code.get_secret_value(),
             store=store,
-            executor=trader,
+            adapter=adapter,
+            hub=hub,
             guard=guard,
             orders=orders,
             min_interval_s=min_interval_s,
@@ -183,19 +184,22 @@ def create_app(
                 "reconnects": feed.reconnects if feed else 0,
             },
             "trading": {
-                "enabled": trader.status != "off",
-                "status": trader.status,
-                "detail": trader.detail,
-                "mode": "reduce-only closes, two-tap confirm",
+                "exchange": adapter.name,
+                "enabled": adapter.can_trade,
+                "status": adapter.status,
+                "detail": adapter.detail,
+                "dry_run": adapter.dry_run,
+                "mode": "two-tap confirm; every order through the policy guard",
             },
             "policy": guard.status(),
             "telegram": {"status": bot.status, "detail": bot.detail},
-            "ws_clients": state.listener_count,
+            "ws_clients": hub.count,
         }
 
     app.state.market = state  # handy for tests / debugging
     app.state.store = store
-    app.state.executor = trader
+    app.state.adapter = adapter
+    app.state.hub = hub
     app.state.guard = guard
     app.state.kill_switch = kill_switch
     return app

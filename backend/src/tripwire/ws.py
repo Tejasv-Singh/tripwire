@@ -25,6 +25,7 @@ from pydantic import BaseModel, ValidationError
 
 from tripwire.actions import ActionFlow
 from tripwire.db import Store
+from tripwire.exchanges.base import ExchangeAdapter
 from tripwire.hl.positions import Position
 from tripwire.hud import (
     PROTOCOL_VERSION,
@@ -33,10 +34,9 @@ from tripwire.hud import (
     next_send_delay,
     resolve_index,
 )
-from tripwire.orders import Order, OrderResult, OrderService
+from tripwire.orders import CloseOrder, Order, OrderResult, OrderService
 from tripwire.policy import Decision, PolicyGuard
 from tripwire.state import MarketState
-from tripwire.trading import CloseRequest, OrderExecutor
 
 log = logging.getLogger(__name__)
 
@@ -77,12 +77,24 @@ class ClientSession:
         self.timers.clear()
 
 
+class ClientHub:
+    """Registry of connected glasses clients (the risk engine asks "is anyone looking?")."""
+
+    def __init__(self) -> None:
+        self.sessions: set[ClientSession] = set()
+
+    @property
+    def count(self) -> int:
+        return len(self.sessions)
+
+
 def make_ws_router(
     *,
     state: MarketState,
     pairing_code: str,
     store: Store | None,
-    executor: OrderExecutor,
+    adapter: ExchangeAdapter,
+    hub: ClientHub,
     guard: PolicyGuard,
     orders: OrderService,
     min_interval_s: float = MIN_INTERVAL_S,
@@ -93,10 +105,15 @@ def make_ws_router(
     order_tasks: set[asyncio.Task[None]] = set()  # strong refs so running orders aren't GC'd
 
     def trading_on() -> bool:
-        return executor.status != "off"
+        return adapter.can_trade
 
     def trading_info() -> dict[str, Any]:
-        return {"enabled": trading_on(), "status": executor.status}
+        return {
+            "enabled": trading_on(),
+            "status": adapter.status,
+            "dry_run": adapter.dry_run,
+            "exchange": adapter.name,
+        }
 
     def selected_position(session: ClientSession) -> Position | None:
         if not state.positions:
@@ -113,9 +130,13 @@ def make_ws_router(
         p = live_position(order.coin)
         return guard.check(order, position=p, mark=p.mark if p else state.marks.get(order.coin))
 
-    async def send_close(order: Order) -> OrderResult:
-        assert isinstance(order, CloseRequest)
-        return await executor.close(order)
+    async def send_order(order: Order) -> OrderResult:
+        """The adapter call for each order kind -- only ever invoked by OrderService.submit()."""
+        if order.kind == "close":
+            return await adapter.close_reduce_only(order)
+        if order.kind == "stop":
+            return await adapter.set_sl(order)
+        return await adapter.place_order(order)
 
     def schedule(session: ClientSession, delay_s: float, token: int) -> None:
         loop = asyncio.get_running_loop()
@@ -131,11 +152,11 @@ def make_ws_router(
         async with session.send_lock:  # sender task, receiver loop and order task all send
             await ws.send_json(payload)
 
-    async def run_order(ws: WebSocket, session: ClientSession, req: CloseRequest) -> None:
+    async def run_order(ws: WebSocket, session: ClientSession, req: CloseOrder) -> None:
         try:
             p = live_position(req.coin)
             result = await orders.submit(  # policy guard, then the exchange
-                req, position=p, mark=p.mark if p else None, send=send_close
+                req, position=p, mark=p.mark if p else None, send=send_order
             )
         except Exception as exc:  # an executor bug must not leave the screen stuck on "sending"
             log.exception("order task failed")
@@ -218,7 +239,7 @@ def make_ws_router(
                 position=position,
                 now=loop.time(),
                 trading=trading_on(),
-                size_decimals=executor.size_decimals(position.coin) if position else None,
+                size_decimals=adapter.size_decimals(position.coin) if position else None,
                 watch=state.watch,
                 precheck=precheck,
             )
@@ -281,8 +302,9 @@ def make_ws_router(
             },
         )
         state.add_listener(session.wake)
+        hub.sessions.add(session)
         session.wake()  # first hud frame immediately
-        log.info("WS client connected: %s (%d total)", client, state.listener_count)
+        log.info("WS client connected: %s (%d total)", client, hub.count)
         send_task = asyncio.create_task(sender(ws, session), name=f"hud-sender-{client}")
         send_task.add_done_callback(_log_task_failure)
         try:
@@ -293,8 +315,9 @@ def make_ws_router(
             session.connected = False
             session.cancel_timers()
             state.remove_listener(session.wake)
+            hub.sessions.discard(session)
             send_task.cancel()
             await asyncio.gather(send_task, return_exceptions=True)
-            log.info("WS client disconnected: %s (%d left)", client, state.listener_count)
+            log.info("WS client disconnected: %s (%d left)", client, hub.count)
 
     return router

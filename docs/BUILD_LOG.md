@@ -706,3 +706,89 @@ test with its exact reason, plus tests that:
 - `/kill` and `/unkill` are owner-only.
 
 Plugin: result titles `BLOCKED`, `PLACED` and `DRY RUN` (29 tests). mypy, ruff and tsc are clean.
+
+### 15. Exchange-agnostic adapter (item 7): Hyperliquid, fake, Bybit-demo stub
+
+**Interface (`exchanges/base.py`, `ExchangeAdapter` Protocol, `runtime_checkable`):**
+- The four the brief asked for: `stream_positions()`, `close_reduce_only()`, `set_sl()`,
+  `place_order()`.
+- Helpers the screens and the guard need: `current_stop(coin)`, `realized_pnl_today()`,
+  `size_decimals(coin)`, `start()`.
+- Flags: `name`, `status`, `detail`, `can_trade`, `dry_run`.
+- `positions_stream(state)` turns MarketState changes into an async iterator. Adapters that keep
+  positions in MarketState use it: Hyperliquid via `hl/feed.py`, and the fake.
+- **Only `OrderService.submit()` calls the order methods** (via `ws.send_order`, which picks the
+  method by `order.kind`).
+
+**Hyperliquid (`exchanges/hyperliquid.py`), which replaces Day-2's `HyperliquidExecutor`:**
+- It no longer calls `Exchange.market_close()`. It builds actions from the SDK's own pieces
+  (`order_request_to_order_wire`, `order_wires_to_order_action`), signs with
+  `sign_l1_action(..., is_mainnet=False)`, and POSTs the same payload shape as
+  `Exchange._post_action`.
+- **Why:** this gives one build-and-sign path that DRY_RUN (§16) can run end to end, skipping
+  only the POST.
+- Consequence: the side and size come from **our** MarketState (clearinghouseState, ≤ about 5 s
+  old) instead of a fresh `user_state` call. `reduce_only` still guarantees a close can't flip.
+- `assert_testnet` runs in the constructor and before every signature. A test spies on
+  `sign_l1_action` and asserts `mainnet=False`.
+
+Order shapes:
+- `close_reduce_only`: IOC limit at mid ± 5 %. The price is rounded like the SDK does it
+  (`round_px`: 5 significant figures, at most 6 − szDecimals decimals) and the size is rounded
+  down. 100 % means the live size.
+- `set_sl`: a trigger `{isMarket: true, tpsl: "sl"}`, reduce-only, sized to the position, with
+  grouping `positionTpsl`. **The new stop is placed first, and the old one is cancelled only
+  after that** (`{"type":"cancel","cancels":[{"a":asset,"o":oid}]}`).
+  - Why that order: the brief said "cancel the existing SL and place a new one", but
+    cancel-first would leave the position unprotected if the new stop were rejected.
+  - Briefly there are two reduce-only stops, and the tighter one fires first.
+  - If the cancel fails, the result says `old SL NOT cancelled: <reason>`.
+- `place_order`: `updateLeverage` (cross, integer), then one `normalTpsl` action with the entry
+  (GTC limit at entry, or IOC at mid ± 5 % for market) plus the SL trigger (plus TP).
+  Size = notional / price, rounded down.
+- `current_stop`: `/info frontendOpenOrders`, filtered to reduce-only `Stop*` triggers on the
+  coin. It picks the tightest: the highest for a long, the lowest for a short.
+- `realized_pnl_today`: `/info userFillsByTime` since 00:00 UTC, as Σ closedPnl − Σ fee. This
+  is the policy guard's `pnl_source`.
+- Replies: `parse_order_response` now also accepts the string statuses Hyperliquid uses for
+  trigger and TP/SL children and cancels (`waitingForTrigger`, `waitingForFill`, `success`) →
+  `placed`.
+
+**Not verified live (no funded account yet):**
+- `positionTpsl` sizing: we send the position size. A low-confidence community source says the
+  web UI sends `0` with `isPositionTpsl`. If testnet rejects ours, `set_sl` returns the
+  exchange's reason, and the old stop stays because we place first.
+- The trigger `limit_px` = trigger price, following the SDK's `basic_tpsl` example.
+
+**Fake (`exchanges/fake.py`):** in-memory Hyperliquid-shaped rows pushed into MarketState. Closes
+fill at mid, there is one stop per coin (place, then the old one is dropped), and realized PnL is
+tracked. Used by the tests and by the demo backend (§20). This replaces the ad-hoc fakes from
+Day 2.
+
+**Bybit demo (`exchanges/bybit_demo.py`):** a stub that satisfies the Protocol. It accepts only
+`https://api-demo.bybit.com` (exact match, like `assert_testnet`). Every order returns "stub - not
+implemented". The docstring maps each method to its Bybit v5 endpoint (e.g.
+`/v5/position/trading-stop` sets the stop in one call, with no cancel step).
+
+**Wiring:**
+- `create_app(make_adapter=...)` takes a factory (tests and demo pass `FakeAdapter`). The default
+  is `HyperliquidAdapter`.
+- The price feed stays in `main.py` and also serves price-only and WATCH mode.
+- New `ClientHub` in `ws.py` counts glasses clients. `/healthz → ws_clients` used to count every
+  MarketState listener, and the positions stream adds one.
+- `/healthz → trading` now has `exchange`, `enabled` (= `can_trade`) and `dry_run`. `hello` and
+  `hud` frames carry the same.
+
+**Checks:**
+- **163 backend tests pass**; mypy and ruff are clean.
+- New `test_trading.py` checks the exact wire for each order type:
+  - Close: `{"a":4,"b":false,"p":"3319.7","s":"0.25","r":true,"t":{"limit":{"tif":"Ioc"}}}`.
+  - SL: place, then cancel; and the old stop is kept if the new one is rejected.
+  - Open: leverage, then entry with SL and TP.
+  - Plus: testnet signing, the key not being kept, a non-testnet Info refused, `current_stop`
+    picking the tightest, PnL arithmetic, the fake, and the Bybit stub.
+- Socket tests now run on `FakeAdapter`.
+
+**Fix, noted for honesty:** the §14 commit corrupted one character in `test_app.py`'s docstring
+(`—` became `â€”`). Windows PowerShell 5.1 `Get-Content`/`Set-Content` re-encoded the UTF-8
+file. It's fixed now, and file edits no longer go through PowerShell.

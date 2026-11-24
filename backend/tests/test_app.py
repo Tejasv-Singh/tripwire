@@ -1,4 +1,4 @@
-"""App wiring: /healthz, CORS, /ws pairing, frames, intents, throttle â€” feed and bot disabled."""
+"""App wiring: /healthz, CORS, /ws pairing, frames, intents, throttle — feed and bot disabled."""
 
 from __future__ import annotations
 
@@ -14,13 +14,12 @@ from hyperliquid.utils import constants
 from starlette.websockets import WebSocketDisconnect
 
 from tripwire.config import Settings, TestnetGuardError
+from tripwire.exchanges.fake import FakeAdapter
 from tripwire.hl.feed import apply_ws_message
 from tripwire.main import RedactSecretsFilter, create_app, redact
+from tripwire.orders import CloseOrder
 from tripwire.state import MarketState
 from tripwire.telegram_bot import TelegramBot, build_application
-from tripwire.trading import CloseRequest, OrderResult, TradingStatus
-
-from .test_state_feed import ACCOUNT, ch_msg
 
 CODE = "test-pairing-code"
 
@@ -49,6 +48,7 @@ def test_healthz(client: TestClient) -> None:
     assert body["hyperliquid"]["connected"] is False
     assert body["telegram"]["status"] == "disabled"
     assert body["trading"]["enabled"] is False and body["trading"]["status"] == "off"
+    assert body["trading"]["exchange"] == "hyperliquid" and "policy" in body
     assert body["ws_clients"] == 0
 
 
@@ -79,7 +79,12 @@ def test_ws_hello_then_hud_frame_then_intents(client: TestClient) -> None:
     with client.websocket_connect(f"/ws?code={CODE}") as ws:
         hello = ws.receive_json()
         assert hello["type"] == "hello" and hello["min_interval_ms"] == 500
-        assert hello["v"] == 2 and hello["trading"] == {"enabled": False, "status": "off"}
+        assert hello["v"] == 2 and hello["trading"] == {
+            "enabled": False,
+            "status": "off",
+            "dry_run": False,
+            "exchange": "hyperliquid",
+        }
         hud = ws.receive_json()
         assert hud["type"] == "hud" and hud["ref"]["mid"] == 1721.25 and hud["position"] is None
         assert hud["ui"] == {"mode": "hud"}
@@ -119,44 +124,41 @@ def recv(ws: Any, kind: str, *, mode: str | None = None, limit: int = 40) -> dic
     raise AssertionError(f"no {kind} frame (mode={mode}) within {limit} frames")
 
 
-class FakeExecutor:
-    def __init__(self) -> None:
-        self.status: TradingStatus = "ready"
-        self.detail = "fake"
-        self.requests: list[CloseRequest] = []
-
-    def size_decimals(self, coin: str) -> int | None:
-        return 4
-
-    async def warm_up(self) -> None:
-        return None
-
-    async def close(self, req: CloseRequest) -> OrderResult:
-        self.requests.append(req)
-        return OrderResult(True, "filled", "Filled 0.25 @ 3499.1", 0.25, 3499.1, 77)
+ETH_ROW = {
+    "coin": "ETH",
+    "szi": "0.5",
+    "entryPx": "3412.0",
+    "liquidationPx": "2980.0",
+    "leverage": {"type": "cross", "value": 5},
+    "positionValue": "1747.2",
+}
 
 
 @pytest.fixture
-def trading_client(tmp_path: Path) -> Iterator[tuple[TestClient, FakeExecutor]]:
-    fake = FakeExecutor()
+def trading_client(tmp_path: Path) -> Iterator[tuple[TestClient, FakeAdapter]]:
+    holder: list[FakeAdapter] = []
+
+    def make(state: MarketState) -> FakeAdapter:
+        apply_ws_message(state, {"channel": "allMids", "data": {"mids": {"ETH": "3494.4"}}})
+        holder.append(FakeAdapter(state, [ETH_ROW]))
+        return holder[0]
+
     app = create_app(
-        settings(tmp_path, hl_account_address=ACCOUNT),
-        run_feed=False,
-        run_bot=False,
-        heartbeat_s=0.2,
-        executor=fake,
+        settings(tmp_path), run_feed=False, run_bot=False, heartbeat_s=0.2, make_adapter=make
     )
     with TestClient(app) as c:
-        state: MarketState = c.app.state.market  # type: ignore[attr-defined]
-        apply_ws_message(state, {"channel": "allMids", "data": {"mids": {"ETH": "3494.4"}}})
-        apply_ws_message(state, ch_msg())
-        yield c, fake
+        yield c, holder[0]
 
 
-def test_two_tap_close_end_to_end(trading_client: tuple[TestClient, FakeExecutor]) -> None:
+def test_two_tap_close_end_to_end(trading_client: tuple[TestClient, FakeAdapter]) -> None:
     client, fake = trading_client
     with client.websocket_connect(f"/ws?code={CODE}") as ws:
-        assert ws.receive_json()["trading"] == {"enabled": True, "status": "ready"}
+        assert ws.receive_json()["trading"] == {
+            "enabled": True,
+            "status": "ready",
+            "dry_run": False,
+            "exchange": "fake",
+        }
         hud = recv(ws, "hud")
         assert hud["position"]["coin"] == "ETH" and hud["position"]["roe_pct"] is not None
 
@@ -171,22 +173,23 @@ def test_two_tap_close_end_to_end(trading_client: tuple[TestClient, FakeExecutor
         assert recv(ws, "ack")["mode"] == "confirm"
         confirm = recv(ws, "hud", mode="confirm")["ui"]
         assert (confirm["label"], confirm["size"], confirm["side"]) == ("Close 50%", 0.25, "LONG")
-        assert fake.requests == []  # nothing sent on the first tap
+        assert fake.calls == []  # nothing sent on the first tap
 
         time.sleep(0.35)  # > MIN_CONFIRM_GAP_S
         ws.send_json({"type": "intent", "action": "tap"})  # tap 2: send
         order = recv(ws, "order")
         assert order["ok"] is True and order["status"] == "filled" and order["coin"] == "ETH"
         result = recv(ws, "hud", mode="result")["ui"]
-        assert result["message"] == "Filled 0.25 @ 3499.1"
+        assert result["message"] == "Filled 0.25 @ 3,494.4"
 
-    assert fake.requests == [CloseRequest("ETH", "LONG", 0.5, 0.25)]
+    assert fake.calls == [("close", CloseOrder("ETH", "LONG", 0.5, 0.25))]
+    assert client.app.state.market.positions[0].size == 0.25  # type: ignore[attr-defined]
     rows = client.app.state.store.recent_orders()  # type: ignore[attr-defined]
-    assert len(rows) == 1 and rows[0]["status"] == "filled" and rows[0]["oid"] == 77
+    assert len(rows) == 1 and rows[0]["status"] == "filled"
 
 
 def test_confirm_window_expires_without_sending(
-    trading_client: tuple[TestClient, FakeExecutor], monkeypatch: pytest.MonkeyPatch
+    trading_client: tuple[TestClient, FakeAdapter], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import tripwire.actions as actions
 
@@ -199,7 +202,7 @@ def test_confirm_window_expires_without_sending(
         assert recv(ws, "ack")["mode"] == "confirm"
         menu = recv(ws, "hud", mode="menu")  # timer fired -> back to the menu
         assert menu["ui"]["note"] == "Confirm expired - not sent"
-    assert fake.requests == []
+    assert fake.calls == []
 
 
 def test_ws_frames_are_throttled_to_500ms(client: TestClient) -> None:
