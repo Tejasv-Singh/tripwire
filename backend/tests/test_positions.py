@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from tripwire.hl.positions import (
+    compute_roe_pct,
     compute_upnl,
     compute_upnl_pct,
     liq_distance_pct,
@@ -67,6 +68,13 @@ def test_upnl_pct_is_on_entry_notional_matching_the_mock() -> None:
     assert compute_upnl_pct(5.0, 0.0, 3412.0) == 0.0  # no notional -> 0, not ZeroDivisionError
 
 
+def test_roe_is_on_initial_margin_like_hyperliquid() -> None:
+    # 0.5 ETH @ 3,412, 5x: initial margin = 1,706 / 5 = 341.2; uPnL 41.2 -> 12.07 %
+    # == Hyperliquid's own returnOnEquity "0.1207" in raw_position()
+    assert compute_roe_pct(2.415, 5.0) == pytest.approx(12.075)
+    assert compute_roe_pct(2.415, 0.0) is None  # unknown leverage -> no ROE
+
+
 def test_liq_distance_long_short_and_missing() -> None:
     assert liq_distance_pct("LONG", 3494.4, 2980.0) == pytest.approx(14.7207, abs=1e-3)
     assert liq_distance_pct("SHORT", 100.0, 125.0) == pytest.approx(25.0)
@@ -92,6 +100,8 @@ def test_normalize_long_uses_mid_for_upnl_and_mark_for_liq() -> None:
     assert p.mid == 3494.4
     assert p.upnl == pytest.approx(41.2)  # from mid, not markPx
     assert p.upnl_pct == pytest.approx(2.415, abs=1e-3)
+    assert p.roe_pct is not None
+    assert p.roe_pct / 100 == pytest.approx(0.1207, abs=1e-4)  # matches HL's returnOnEquity
     assert (p.mark, p.mark_source) == (3500.0, "markPx")
     assert p.liq_px == 2980.0
     assert p.liq_dist_pct == pytest.approx((3500.0 - 2980.0) / 3500.0 * 100)
@@ -161,7 +171,7 @@ def test_to_dict_contains_every_spec_field() -> None:
     p = normalize_position(raw_position(), mids={"ETH": 3494.4}, marks={"ETH": 3500.0})
     assert p is not None
     spec = {
-        "coin", "side", "size", "entry", "mark", "upnl", "upnl_pct",
+        "coin", "side", "size", "entry", "mark", "upnl", "upnl_pct", "roe_pct",
         "liq_px", "liq_dist_pct", "leverage",
     }  # fmt: skip
     assert spec <= set(p.to_dict())

@@ -127,6 +127,15 @@ async def on_forwarded(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await msg.reply_text(f"Echo: {text}" if text else "Echo: (forwarded message without text)")
 
 
+def on_polling_error(exc: TelegramError) -> None:
+    """getUpdates failed while running: almost always Telegram dropping the long-poll connection
+    (httpx.ReadError). PTB retries on its own; log ONE line instead of PTB's default ERROR with a
+    40-line traceback. Must be a plain function: PTB refuses coroutine error callbacks."""
+    log.warning(
+        "Telegram polling hiccup (%s: %s) - reconnecting automatically", type(exc).__name__, exc
+    )
+
+
 def build_application(token: str, store: Store | None) -> Application:  # type: ignore[type-arg]
     app = (
         Application.builder()
@@ -208,7 +217,9 @@ class TelegramBot:
                 await app.initialize()  # getMe -> validates the token
                 await app.start()
                 await app.updater.start_polling(
-                    allowed_updates=ALLOWED_UPDATES, drop_pending_updates=True
+                    allowed_updates=ALLOWED_UPDATES,
+                    drop_pending_updates=True,
+                    error_callback=on_polling_error,
                 )
             except asyncio.CancelledError:
                 await self._safe_shutdown(app)

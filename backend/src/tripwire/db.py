@@ -2,6 +2,7 @@
 
   business_connections  one row per Telegram Business connection (who connected the bot, enabled?)
   intent_log            every intent the glasses sent (audit trail for later risk actions)
+  order_log             every reduce-only close that was confirmed on the glasses, and its result
 
 Each call opens its own short-lived connection; callers run these via asyncio.to_thread().
 """
@@ -28,6 +29,21 @@ CREATE TABLE IF NOT EXISTS intent_log (
     ts      INTEGER NOT NULL,
     action  TEXT NOT NULL,
     client  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS order_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts           INTEGER NOT NULL,          -- ms since epoch, when the result came back
+    client       TEXT NOT NULL,
+    coin         TEXT NOT NULL,
+    side         TEXT NOT NULL,             -- side of the position that was reduced
+    fraction     REAL NOT NULL,             -- 0.25 / 0.5 / 1.0
+    size         REAL,                      -- coin units requested; NULL = whole position
+    ok           INTEGER NOT NULL,
+    status       TEXT NOT NULL,             -- filled / resting / rejected / error
+    filled_size  REAL,
+    avg_px       REAL,
+    oid          INTEGER,
+    message      TEXT NOT NULL
 );
 """
 
@@ -88,6 +104,52 @@ class Store:
                 "INSERT INTO intent_log (ts, action, client) VALUES (?, ?, ?)",
                 (int(time.time() * 1000), action, client),
             )
+
+    def log_order(
+        self,
+        *,
+        client: str,
+        coin: str,
+        side: str,
+        fraction: float,
+        size: float | None,
+        ok: bool,
+        status: str,
+        filled_size: float | None,
+        avg_px: float | None,
+        oid: int | None,
+        message: str,
+    ) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO order_log (ts, client, coin, side, fraction, size, ok, status,
+                                       filled_size, avg_px, oid, message)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    int(time.time() * 1000),
+                    client,
+                    coin,
+                    side,
+                    fraction,
+                    size,
+                    int(ok),
+                    status,
+                    filled_size,
+                    avg_px,
+                    oid,
+                    message,
+                ),
+            )
+
+    def recent_orders(self, limit: int = 20) -> list[dict[str, object]]:
+        with closing(self._connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM order_log ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
 
     def recent_intents(self, limit: int = 20) -> list[tuple[int, str, str]]:
         with closing(self._connect()) as conn:

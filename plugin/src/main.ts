@@ -3,15 +3,17 @@
 //   2. one glasses page, one full-screen text container (glasses.ts)
 //   3. WebSocket to the backend (link.ts); every hud frame -> renderHud() -> textContainerUpgrade
 //   4. ring/temple input -> intents (input.ts); FOREGROUND_ENTER -> reconnect
+//   5. tap opens the actions menu; the backend runs the menu / two-tap confirm (protocol v2) and
+//      every hud frame carries `ui` (which screen to draw) — the plugin never decides to trade
 
 import { waitForEvenAppBridge, type EvenAppBridge } from '@evenrealities/even_hub_sdk'
 import { fetchHealth } from './api'
 import { BACKEND_URL, DEV_PAIRING_CODE, PAIRING_STORAGE_KEY } from './config'
 import { GlassesDisplay } from './glasses'
-import { renderHud, type LinkView } from './hud'
+import { currentMode, renderHud, type LinkView } from './hud'
 import { commandFromEvent } from './input'
 import { BackendLink } from './link'
-import type { HudFrame } from './protocol'
+import { PROTOCOL_VERSION, type HudFrame } from './protocol'
 import { logLine, mountUi, setChip, setHealth, setMirror, setPairingCodeField } from './ui'
 
 const CLOCK_TICK_MS = 10_000 // keeps HH:MM and "link stale" fresh between frames
@@ -48,20 +50,26 @@ link = new BackendLink({
   onOther: (f) => {
     if (f.type === 'ack') {
       const where = f.view.count ? `${f.view.index + 1}/${f.view.count}` : 'no positions'
-      logLine(`ack ${f.action} -> ${where}${f.note ? ` (${f.note})` : ''}`)
+      logLine(`ack ${f.action} -> ${f.mode}, ${where}${f.note ? ` (${f.note})` : ''}`)
+    } else if (f.type === 'order') {
+      logLine(`ORDER ${f.coin} close ${Math.round(f.fraction * 100)}%: ${f.status} - ${f.message}`)
     } else if (f.type === 'error') logLine(`backend error: ${f.error}`)
-    else if (f.type === 'hello') logLine(`hello: protocol v${f.v}, ${f.network}`)
+    else if (f.type === 'hello') {
+      const mismatch = f.v !== PROTOCOL_VERSION ? ` (plugin speaks v${PROTOCOL_VERSION}!)` : ''
+      logLine(`hello: protocol v${f.v}${mismatch}, ${f.network}, trading ${f.trading?.status ?? '?'}`)
+    }
   },
   log: logLine,
 })
 link.connect()
 
 const unsubscribe = bridge.onEvenHubEvent((event) => {
-  const cmd = commandFromEvent(event)
+  // the backend's screen decides what a double tap means (exit on the HUD, back elsewhere);
+  // with the link down it is always the HUD, so the user can always leave
+  const cmd = commandFromEvent(event, currentMode(frame, linkView))
   if (!cmd || !link) return
   switch (cmd.kind) {
     case 'intent': {
-      if (cmd.action === 'actions') console.log('[tripwire] actions intent (menu not implemented yet)')
       const sent = link.sendIntent(cmd.action)
       logLine(sent ? `intent ${cmd.action}` : `intent ${cmd.action} dropped (offline)`)
       break

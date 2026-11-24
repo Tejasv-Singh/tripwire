@@ -1,33 +1,38 @@
 import { describe, expect, it } from 'vitest'
 import {
+  FOOTERS,
   MAX_COLS,
   MAX_LINES,
+  currentMode,
   fit,
   fmtCompact,
   fmtLive,
   fmtPct,
+  fmtQty,
   fmtSize,
   fmtUsd,
   headerLine,
   renderHud,
+  wrap,
   type LinkView,
 } from './hud'
-import type { HudFrame, Position } from './protocol'
+import type { HudFrame, Position, UiState } from './protocol'
 
 const NOW = new Date(2026, 10, 23, 9, 5)
 
 const ethLong: Position = {
   coin: 'ETH', side: 'LONG', size: 0.5, entry: 3412, mark: 3494.4, upnl: 41.2,
-  upnl_pct: 2.4150, liq_px: 2980, liq_dist_pct: 12.66, leverage: 5, mid: 3494.4,
+  upnl_pct: 2.4150, roe_pct: 12.075, liq_px: 2980, liq_dist_pct: 12.66, leverage: 5, mid: 3494.4,
   mark_source: 'markPx', leverage_type: 'cross',
 }
 
 function frame(over: Partial<HudFrame> = {}): HudFrame {
   return {
-    type: 'hud', v: 1, seq: 1, ts: 0, network: 'testnet',
+    type: 'hud', v: 2, seq: 1, ts: 0, network: 'testnet',
     feed: { connected: true, age_ms: 300 }, account: false,
     view: { index: 0, count: 0 }, position: null,
     ref: { coin: 'ETH', mid: 1721.75, mark: 1721.9, mark_source: 'markPx' },
+    ui: { mode: 'hud' }, trading: { enabled: false, status: 'off' },
     ...over,
   }
 }
@@ -42,7 +47,7 @@ function assertFits(text: string): void {
 }
 
 describe('renderHud', () => {
-  it('renders the position mock exactly', () => {
+  it('renders the position mock exactly (plus the Day-2 ROE figure)', () => {
     const text = renderHud({
       frame: frame({ account: true, position: ethLong, view: { index: 0, count: 1 } }),
       link: { kind: 'open' },
@@ -51,7 +56,7 @@ describe('renderHud', () => {
     expect(text.split('\n')).toEqual([
       'TRIPWIRE            TESTNET      09:05',
       'ETH-PERP LONG 0.50 @ 3,412  5x',
-      'uPnL +$41.20 (+2.4%)',
+      'uPnL +$41.20 (+2.4%)  ROE +12.1%',
       'Liq 2,980  12.7% away',
       '----------------------------------------',
       'tap: actions  swipe: next  2x: exit',
@@ -83,7 +88,8 @@ describe('renderHud', () => {
   it('shows a position counter, short side, losses, and liq edge cases', () => {
     const short: Position = {
       ...ethLong, coin: 'BTC', side: 'SHORT', size: 0.012, entry: 61280, upnl: -12.3,
-      upnl_pct: -1.67, liq_px: 66000, liq_dist_pct: -0.4, leverage: 12.5, mark_source: 'mid',
+      upnl_pct: -1.67, roe_pct: null, liq_px: 66000, liq_dist_pct: -0.4, leverage: 12.5,
+      mark_source: 'mid',
     }
     const text = renderHud({
       frame: frame({ account: true, position: short, view: { index: 1, count: 3 } }),
@@ -91,7 +97,7 @@ describe('renderHud', () => {
       now: NOW,
     })
     expect(text).toContain('BTC-PERP SHORT 0.012 @ 61,280  12.5x  2/3')
-    expect(text).toContain('uPnL -$12.30 (-1.7%)')
+    expect(text.split('\n')).toContain('uPnL -$12.30 (-1.7%)') // no ROE when it is null
     expect(text).toContain('Liq 66,000  AT/PAST LIQ (mid)')
     assertFits(text)
     const noLiq = renderHud({
@@ -126,7 +132,8 @@ describe('renderHud', () => {
   it('never exceeds limits even with absurd inputs', () => {
     const huge: Position = {
       ...ethLong, coin: 'SUPERLONGCOINNAME', size: 123456789.123, entry: 98765432.1,
-      upnl: -987654321.99, upnl_pct: -99999.9, liq_px: 123456789, liq_dist_pct: 9999, leverage: 50,
+      upnl: -987654321.99, upnl_pct: -99999.9, roe_pct: -4999995, liq_px: 123456789,
+      liq_dist_pct: 9999, leverage: 50,
     }
     const text = renderHud({
       frame: frame({ account: true, position: huge, view: { index: 98, count: 99 } }),
@@ -134,6 +141,97 @@ describe('renderHud', () => {
       now: NOW,
     })
     assertFits(text)
+  })
+})
+
+describe('action screens', () => {
+  const pos = { account: true, position: ethLong, view: { index: 0, count: 1 } }
+  const at = (ui: UiState, over: Partial<HudFrame> = {}) =>
+    renderHud({ frame: frame({ ...pos, ui, ...over }), link: { kind: 'open' }, now: NOW })
+  const menu: UiState = {
+    mode: 'menu', coin: 'ETH', items: ['Close 25%', 'Close 50%', 'Close 100%', 'Back'],
+    cursor: 1, trading: true, note: null,
+  }
+  const confirm: UiState = {
+    mode: 'confirm', coin: 'ETH', side: 'LONG', label: 'Close 50%', fraction: 0.5, size: 0.25,
+    all: false, exact: true, est_px: 3494.4, slippage_pct: 5, expires_in_ms: 4200,
+  }
+
+  it('renders the menu with a cursor, reduce-only tag and its own footer', () => {
+    expect(at(menu).split('\n')).toEqual([
+      'TRIPWIRE            TESTNET      09:05',
+      'ACTIONS  ETH-PERP LONG 0.50  reduce-only',
+      '  Close 25%',
+      '> Close 50%',
+      '  Close 100%',
+      '  Back',
+      '----------------------------------------',
+      FOOTERS.menu,
+    ])
+  })
+
+  it('says when trading is off, shows notes, and survives the position closing', () => {
+    expect(at({ ...menu, trading: false })).toContain('Trading off: read-only (no agent key)')
+    expect(at({ ...menu, note: 'Confirm expired - not sent' })).toContain('Confirm expired - not sent')
+    expect(at(menu, { position: null })).toContain('ACTIONS  ETH-PERP  position closed')
+  })
+
+  it('renders the confirm screen with the exact order', () => {
+    expect(at(confirm).split('\n')).toEqual([
+      'TRIPWIRE            TESTNET      09:05',
+      'CONFIRM  Close 50%  ETH-PERP LONG',
+      'SELL 0.25 ETH  reduce-only IOC',
+      'at ~3,494.4 mark, max 5% slippage',
+      'Tap again within 5s to SEND.',
+      '----------------------------------------',
+      'tap: SEND  swipe/2x: cancel',
+    ])
+  })
+
+  it('confirm: BUY to close a short, ALL for 100%, ~ when the size is not rounded yet', () => {
+    expect(at({ ...confirm, side: 'SHORT' })).toContain('BUY 0.25 ETH  reduce-only IOC')
+    expect(at({ ...confirm, all: true, size: 0.5, label: 'Close 100%' })).toContain('SELL ALL 0.5 ETH')
+    expect(at({ ...confirm, exact: false, size: 0.125 })).toContain('SELL ~0.125 ETH')
+  })
+
+  it('renders sending and results, wrapping long exchange errors', () => {
+    expect(at({ ...confirm, mode: 'sending' })).toContain('SENDING  Close 50%  ETH-PERP')
+    const filled = at({
+      mode: 'result', coin: 'ETH', ok: true, status: 'filled',
+      message: 'Filled 0.25 @ 3499.1', label: 'Close 50%',
+    })
+    expect(filled.split('\n').slice(1, 3)).toEqual(['FILLED  Close 50%  ETH-PERP', 'Filled 0.25 @ 3499.1'])
+    const long = at({
+      mode: 'result', coin: 'ETH', ok: false, status: 'rejected', label: 'Close 25%',
+      message: 'Order could not immediately match against any resting orders. asset=4 and more',
+    })
+    expect(long).toContain('NOT DONE  Close 25%  ETH-PERP')
+    assertFits(long)
+  })
+
+  it('every action screen fits, even with a feed warning and long notes', () => {
+    const screens: UiState[] = [
+      { ...menu, trading: false, note: 'x'.repeat(80) },
+      confirm,
+      { ...confirm, mode: 'sending' },
+      {
+        mode: 'result', coin: 'SUPERLONGCOINNAME', ok: false, status: 'error', label: 'Close 100%',
+        message: 'y'.repeat(300),
+      },
+    ]
+    for (const ui of screens) {
+      const text = at(ui, { feed: { connected: false, age_ms: 99_000 } })
+      assertFits(text)
+      expect(text.split('\n').at(-1)).toBe(FOOTERS[ui.mode]) // the footer is never pushed off
+    }
+  })
+
+  it('falls back to the HUD screen (and its exit footer) when the link is down', () => {
+    expect(currentMode(frame({ ui: menu }), { kind: 'open' })).toBe('menu')
+    expect(currentMode(frame({ ui: menu }), { kind: 'retrying', inSeconds: 3 })).toBe('hud')
+    expect(currentMode(null, { kind: 'open' })).toBe('hud')
+    const down = renderHud({ frame: frame({ ui: menu }), link: { kind: 'retrying', inSeconds: 3 }, now: NOW })
+    expect(down.split('\n').at(-1)).toBe(FOOTERS.hud)
   })
 })
 
@@ -157,6 +255,18 @@ describe('formatters', () => {
     expect(fmtUsd(-1234.5)).toBe('-$1,234.50')
     expect(fmtPct(2.415)).toBe('+2.4%')
     expect(fmtPct(-0.04)).toBe('-0.0%')
+  })
+
+  it('fmtQty keeps every decimal the backend rounded to', () => {
+    expect(fmtQty(0.125)).toBe('0.125')
+    expect(fmtQty(0.00012345)).toBe('0.00012345')
+    expect(fmtQty(1234.5)).toBe('1,234.5')
+  })
+
+  it('wrap() breaks on words and hard-splits long words', () => {
+    expect(wrap('aa bb cc', 5)).toEqual(['aa bb', 'cc'])
+    expect(wrap('abcdefghij', 4)).toEqual(['abcd', 'efgh', 'ij'])
+    expect(wrap('  ', 4)).toEqual([])
   })
 
   it('fit() strips non-ASCII and truncates', () => {

@@ -127,3 +127,12 @@ async def test_empty_token_never_starts(token: str) -> None:
     await bot.start()
     assert bot.status == "disabled" and h.apps == []
     await bot.stop()
+
+
+def test_polling_errors_log_one_line(caplog: pytest.LogCaptureFixture) -> None:
+    from tripwire.telegram_bot import on_polling_error
+
+    with caplog.at_level("WARNING", logger="tripwire.telegram_bot"):
+        on_polling_error(NetworkError("httpx.ReadError: "))
+    assert len(caplog.records) == 1 and caplog.records[0].exc_info is None
+    assert "reconnecting automatically" in caplog.text

@@ -20,6 +20,7 @@ from tripwire.db import Store
 from tripwire.hl.feed import HyperliquidFeed
 from tripwire.state import MarketState
 from tripwire.telegram_bot import TelegramBot
+from tripwire.trading import DisabledExecutor, HyperliquidExecutor, OrderExecutor
 from tripwire.ws import make_ws_router
 
 log = logging.getLogger("tripwire")
@@ -71,6 +72,7 @@ def create_app(
     run_bot: bool = True,
     min_interval_s: float = 0.5,
     heartbeat_s: float = 5.0,
+    executor: OrderExecutor | None = None,
 ) -> FastAPI:
     settings = settings or Settings()  # type: ignore[call-arg]  # values come from .env
     assert_testnet(settings.hl_api_url)  # refuse to start on anything but testnet
@@ -80,20 +82,35 @@ def create_app(
     store = Store(settings.resolved_db_path)
     bot = TelegramBot(settings.telegram_bot_token.get_secret_value() if run_bot else "", store)
     feed = HyperliquidFeed(settings.hl_api_url, state) if run_feed else None
+    if executor is None:
+        executor = (
+            HyperliquidExecutor(
+                base_url=settings.hl_api_url,
+                account_address=settings.hl_account_address,
+                agent_key=settings.hl_agent_key.get_secret_value(),
+            )
+            if settings.trading_enabled
+            else DisabledExecutor()
+        )
+    trader: OrderExecutor = executor
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(store.init)
         feed_task = asyncio.create_task(feed.run(), name="hl-feed") if feed else None
+        warm_task = asyncio.create_task(trader.warm_up(), name="trading-warm-up")
         await bot.start()
         log.info(
-            "Tripwire backend up: network=testnet account=%s telegram=%s",
+            "Tripwire backend up: network=testnet account=%s trading=%s telegram=%s",
             "set" if settings.hl_account_address else "none (reference price only)",
+            trader.status,
             bot.status,
         )
         try:
             yield
         finally:
+            warm_task.cancel()
+            await asyncio.gather(warm_task, return_exceptions=True)
             await bot.stop()
             if feed_task:
                 feed_task.cancel()
@@ -112,6 +129,7 @@ def create_app(
             state=state,
             pairing_code=settings.pairing_code.get_secret_value(),
             store=store,
+            executor=trader,
             min_interval_s=min_interval_s,
             heartbeat_s=heartbeat_s,
         )
@@ -130,10 +148,17 @@ def create_app(
                 "positions": len(state.positions),
                 "reconnects": feed.reconnects if feed else 0,
             },
+            "trading": {
+                "enabled": trader.status != "off",
+                "status": trader.status,
+                "detail": trader.detail,
+                "mode": "reduce-only closes, two-tap confirm",
+            },
             "telegram": {"status": bot.status, "detail": bot.detail},
             "ws_clients": state.listener_count,
         }
 
     app.state.market = state  # handy for tests / debugging
     app.state.store = store
+    app.state.executor = trader
     return app

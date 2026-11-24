@@ -8,9 +8,14 @@ Price sources (see docs/BUILD_LOG.md, "Price sources"):
 Formulas (all in percent):
   upnl         = szi * (mid - entry)                 # szi is signed: +long / -short
   upnl_pct     = upnl / (|szi| * entry) * 100        # on ENTRY NOTIONAL (unlevered move)
+  roe_pct      = upnl / (|szi| * entry / leverage) * 100  = upnl_pct * leverage
+                                                     # on INITIAL MARGIN: Hyperliquid's own
+                                                     # `returnOnEquity` definition (its UI's ROE)
   liq_dist_pct = (mark - liq) / mark * 100   LONG    # >0 = buffer left, <=0 = at/through liq
                = (liq - mark) / mark * 100   SHORT
-TODO(Day 2): also expose ROE on margin (upnl / margin used) as a second figure next to upnl_pct.
+ROE uses initial margin (entry notional / leverage), not `marginUsed`: on cross positions
+`marginUsed` moves with the price, so ROE would drift even with flat PnL. Isolated positions with
+extra margin added are approximated the same way (documented in docs/BUILD_LOG.md section 12).
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ class Position:
     mark: float  # price used for liquidation distance (markPx, or mid fallback)
     upnl: float
     upnl_pct: float
+    roe_pct: float | None  # None when leverage is unknown (0)
     liq_px: float | None  # None when the exchange reports no liquidation price
     liq_dist_pct: float | None
     leverage: float
@@ -65,6 +71,11 @@ def compute_upnl(szi: float, entry: float, mid: float) -> float:
 def compute_upnl_pct(upnl: float, size: float, entry: float) -> float:
     notional = abs(size) * entry
     return 0.0 if notional == 0 else upnl / notional * 100.0
+
+
+def compute_roe_pct(upnl_pct: float, leverage: float) -> float | None:
+    """Return on initial margin. upnl / (notional / leverage) == upnl_pct * leverage."""
+    return None if leverage <= 0 else upnl_pct * leverage
 
 
 def liq_distance_pct(side: Side, mark: float, liq_px: float | None) -> float | None:
@@ -121,6 +132,7 @@ def normalize_position(
 
     liq_px = to_float(raw.get("liquidationPx"))
     upnl = compute_upnl(szi, entry, mid)
+    upnl_pct = compute_upnl_pct(upnl, size, entry)
     return Position(
         coin=coin,
         side=side,
@@ -128,7 +140,8 @@ def normalize_position(
         entry=entry,
         mark=mark,
         upnl=upnl,
-        upnl_pct=compute_upnl_pct(upnl, size, entry),
+        upnl_pct=upnl_pct,
+        roe_pct=compute_roe_pct(upnl_pct, leverage),
         liq_px=liq_px,
         liq_dist_pct=liq_distance_pct(side, mark, liq_px),
         leverage=leverage,

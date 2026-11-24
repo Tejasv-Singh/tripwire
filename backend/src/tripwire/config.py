@@ -21,6 +21,7 @@ ENV_FILE = REPO_ROOT / ".env"
 TESTNET_API_URL: str = constants.TESTNET_API_URL
 
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_PRIVATE_KEY_RE = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
 MIN_PAIRING_CODE_LEN = 8
 
 
@@ -50,7 +51,7 @@ class Settings(BaseSettings):
 
     # --- user-provided -------------------------------------------------------------------------
     hl_account_address: str = ""  # public 0x address; empty -> HUD shows only the reference price
-    hl_agent_key: SecretStr = SecretStr("")  # API/agent wallet key; unused on Day 1
+    hl_agent_key: SecretStr = SecretStr("")  # API/agent wallet key; empty -> trading off
     telegram_bot_token: SecretStr = SecretStr("")  # empty -> bot skipped
     anthropic_api_key: SecretStr = SecretStr("")  # unused on Day 1
     pairing_code: SecretStr  # required: the plugin must present it as /ws?code=...
@@ -71,12 +72,28 @@ class Settings(BaseSettings):
             )
         return v.lower()
 
+    @field_validator("hl_agent_key")
+    @classmethod
+    def _check_agent_key(cls, v: SecretStr) -> SecretStr:
+        key = v.get_secret_value().strip()
+        if key and not _PRIVATE_KEY_RE.match(key):
+            # never echo the value: it is a private key
+            raise ValueError(
+                "HL_AGENT_KEY must be empty or a 64-hex-char private key (0x optional)"
+            )
+        return SecretStr(key)
+
     @field_validator("pairing_code")
     @classmethod
     def _check_pairing_code(cls, v: SecretStr) -> SecretStr:
         if len(v.get_secret_value().strip()) < MIN_PAIRING_CODE_LEN:
             raise ValueError(f"PAIRING_CODE must be at least {MIN_PAIRING_CODE_LEN} characters")
         return SecretStr(v.get_secret_value().strip())
+
+    @property
+    def trading_enabled(self) -> bool:
+        """Orders need both: the agent key signs, the account address says whose positions."""
+        return bool(self.hl_account_address and self.hl_agent_key.get_secret_value())
 
     @property
     def cors_origin_list(self) -> list[str]:

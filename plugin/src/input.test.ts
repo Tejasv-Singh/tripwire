@@ -14,15 +14,31 @@ describe('commandFromEvent', () => {
     expect(commandFromEvent(sys(OsEventTypeList.SCROLL_BOTTOM_EVENT))).toEqual({ kind: 'intent', action: 'next' })
   })
 
-  it('maps a tap (eventType omitted on the wire) to the actions intent', () => {
-    expect(commandFromEvent(text(undefined))).toEqual({ kind: 'intent', action: 'actions' })
-    expect(commandFromEvent(sys(OsEventTypeList.CLICK_EVENT))).toEqual({ kind: 'intent', action: 'actions' })
+  it('maps a tap (eventType omitted on the wire) to the tap intent on every screen', () => {
+    expect(commandFromEvent(text(undefined))).toEqual({ kind: 'intent', action: 'tap' })
+    expect(commandFromEvent(sys(OsEventTypeList.CLICK_EVENT))).toEqual({ kind: 'intent', action: 'tap' })
+    expect(commandFromEvent(text(undefined), 'confirm')).toEqual({ kind: 'intent', action: 'tap' })
   })
 
-  it('double tap exits, and wins over anything else', () => {
+  it('double tap exits from the HUD, and wins over anything else', () => {
     expect(commandFromEvent(sys(OsEventTypeList.DOUBLE_CLICK_EVENT))).toEqual({ kind: 'exit' })
     const both = { ...text(undefined), ...sys(OsEventTypeList.DOUBLE_CLICK_EVENT) } as EvenHubEvent
     expect(commandFromEvent(both)).toEqual({ kind: 'exit' })
+    expect(commandFromEvent(both, 'hud')).toEqual({ kind: 'exit' })
+  })
+
+  it('double tap backs out of menu / confirm / result instead of exiting', () => {
+    for (const mode of ['menu', 'confirm', 'sending', 'result'] as const) {
+      expect(commandFromEvent(sys(OsEventTypeList.DOUBLE_CLICK_EVENT), mode)).toEqual({
+        kind: 'intent',
+        action: 'back',
+      })
+    }
+  })
+
+  it('swipes stay next/prev on every screen (the backend decides what they mean)', () => {
+    expect(commandFromEvent(text(OsEventTypeList.SCROLL_BOTTOM_EVENT), 'menu')).toEqual({ kind: 'intent', action: 'next' })
+    expect(commandFromEvent(text(OsEventTypeList.SCROLL_TOP_EVENT), 'confirm')).toEqual({ kind: 'intent', action: 'prev' })
   })
 
   it('maps lifecycle events', () => {

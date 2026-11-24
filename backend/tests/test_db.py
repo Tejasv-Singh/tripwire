@@ -31,3 +31,19 @@ def test_schema_has_no_message_text_column(tmp_path: Path) -> None:
             for row in conn.execute(f"PRAGMA table_info({table})")
         }
     assert not cols & {"text", "message", "body", "content", "caption"}
+
+
+def test_order_log_round_trip(tmp_path: Path) -> None:
+    store = Store(tmp_path / "o.sqlite3")
+    store.init()
+    store.log_order(
+        client="1.2.3.4:5", coin="ETH", side="LONG", fraction=0.5, size=0.25, ok=True,
+        status="filled", filled_size=0.25, avg_px=3499.1, oid=77, message="Filled 0.25 @ 3499.1",
+    )  # fmt: skip
+    store.log_order(
+        client="1.2.3.4:5", coin="ETH", side="LONG", fraction=1.0, size=None, ok=False,
+        status="rejected", filled_size=None, avg_px=None, oid=None, message="nope",
+    )  # fmt: skip
+    rows = store.recent_orders()
+    assert [r["status"] for r in rows] == ["rejected", "filled"]  # newest first
+    assert rows[0]["size"] is None and rows[1]["avg_px"] == 3499.1 and rows[1]["ok"] == 1

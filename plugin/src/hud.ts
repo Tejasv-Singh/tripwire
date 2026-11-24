@@ -2,12 +2,20 @@
 // Hard limits (enforced by hud.test.ts): ASCII only, <= 46 chars per line, <= 9 lines.
 // The G2 font is proportional, so column padding is approximate on the real display.
 
-import type { HudFrame, Position } from './protocol'
+import type { HudFrame, MenuScreen, OrderScreen, Position, ResultScreen, UiMode } from './protocol'
 
 export const MAX_COLS = 46
 export const MAX_LINES = 9
+const BODY_LINES = MAX_LINES - 3 // header + separator + footer are always shown
 const SEPARATOR = '-'.repeat(40)
-const FOOTER = 'tap: actions  swipe: next  2x: exit'
+export const FOOTERS: Record<UiMode | 'link', string> = {
+  hud: 'tap: actions  swipe: next  2x: exit',
+  menu: 'tap: select  swipe: move  2x: back',
+  confirm: 'tap: SEND  swipe/2x: cancel',
+  sending: 'sending... please wait',
+  result: 'tap/swipe/2x: back to HUD',
+  link: 'tap: actions  swipe: next  2x: exit',
+}
 
 export type LinkView =
   | { kind: 'unconfigured' } // no VITE_BACKEND_URL
@@ -67,6 +75,11 @@ export function fmtPct(n: number): string {
   return `${n < 0 ? '-' : '+'}${Math.abs(n).toFixed(1)}%`
 }
 
+/** Exact order size for the confirm screen: every decimal the backend sent (up to 8). */
+export function fmtQty(n: number): string {
+  return n.toLocaleString('en-US', { maximumFractionDigits: 8 })
+}
+
 export function fmtClock(d: Date): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
@@ -81,7 +94,8 @@ function positionLines(p: Position, index: number, count: number): string[] {
   const lev = `${Number.isInteger(p.leverage) ? p.leverage : p.leverage.toFixed(1)}x`
   const counter = count > 1 ? `  ${index + 1}/${count}` : ''
   const l1 = `${p.coin}-PERP ${p.side} ${fmtSize(p.size)} @ ${fmtCompact(p.entry)}  ${lev}${counter}`
-  const l2 = `uPnL ${fmtUsd(p.upnl)} (${fmtPct(p.upnl_pct)})`
+  let l2 = `uPnL ${fmtUsd(p.upnl)} (${fmtPct(p.upnl_pct)})`
+  if (p.roe_pct !== null && p.roe_pct !== undefined) l2 += `  ROE ${fmtPct(p.roe_pct)}`
   let l3: string
   if (p.liq_px === null || p.liq_dist_pct === null) l3 = 'Liq none'
   else if (p.liq_dist_pct <= 0) l3 = `Liq ${fmtCompact(p.liq_px)}  AT/PAST LIQ`
@@ -107,6 +121,64 @@ function feedLine(f: HudFrame, frameAgeMs: number | undefined): string | null {
   return null
 }
 
+// --- action screens (backend ActionFlow; see backend/src/tripwire/actions.py) --------------------
+
+function positionTag(p: Position | null, coin: string | null): string {
+  if (p) return `${p.coin}-PERP ${p.side} ${fmtSize(p.size)}`
+  return coin ? `${coin}-PERP  position closed` : 'position closed'
+}
+
+function menuLines(f: HudFrame, ui: MenuScreen): string[] {
+  const lines = [`ACTIONS  ${positionTag(f.position, ui.coin)}  reduce-only`]
+  ui.items.forEach((item, i) => lines.push(`${i === ui.cursor ? '>' : ' '} ${item}`))
+  const note = ui.note ?? (ui.trading ? null : 'Trading off: read-only (no agent key)')
+  if (note) lines.push(note)
+  return lines
+}
+
+function orderLine(ui: OrderScreen): string {
+  const verb = ui.side === 'LONG' ? 'SELL' : 'BUY' // closing a long sells, closing a short buys
+  const qty = ui.all ? `ALL ${fmtQty(ui.size)}` : `${ui.exact ? '' : '~'}${fmtQty(ui.size)}`
+  return `${verb} ${qty} ${ui.coin}  reduce-only IOC`
+}
+
+function confirmLines(ui: OrderScreen): string[] {
+  const secs = Math.max(1, Math.ceil(ui.expires_in_ms / 1000))
+  return [
+    `CONFIRM  ${ui.label}  ${ui.coin}-PERP ${ui.side}`,
+    orderLine(ui),
+    `at ~${fmtLive(ui.est_px)} mark, max ${ui.slippage_pct}% slippage`,
+    `Tap again within ${secs}s to SEND.`,
+  ]
+}
+
+function sendingLines(ui: OrderScreen): string[] {
+  return [`SENDING  ${ui.label}  ${ui.coin}-PERP`, orderLine(ui), 'Waiting for Hyperliquid testnet...']
+}
+
+const RESULT_TITLES = { filled: 'FILLED', resting: 'RESTING', rejected: 'NOT DONE', error: 'ERROR' }
+
+function resultLines(ui: ResultScreen): string[] {
+  const what = [ui.label, ui.coin ? `${ui.coin}-PERP` : null].filter(Boolean).join('  ')
+  return [`${RESULT_TITLES[ui.status]}  ${what}`.trimEnd(), ...wrap(ui.message, MAX_COLS).slice(0, 3)]
+}
+
+function screenLines(f: HudFrame): string[] {
+  const ui = f.ui ?? { mode: 'hud' }
+  switch (ui.mode) {
+    case 'menu':
+      return menuLines(f, ui)
+    case 'confirm':
+      return confirmLines(ui)
+    case 'sending':
+      return sendingLines(ui)
+    case 'result':
+      return resultLines(ui)
+    case 'hud':
+      return f.position ? positionLines(f.position, f.view.index, f.view.count) : referenceLines(f)
+  }
+}
+
 function linkLines(link: LinkView): string[] {
   switch (link.kind) {
     case 'unconfigured':
@@ -126,18 +198,47 @@ function linkLines(link: LinkView): string[] {
 
 // --- page ----------------------------------------------------------------------------------------
 
+/** Screen the plugin is showing: the backend's ui.mode while the link is up, else the HUD. */
+export function currentMode(frame: HudFrame | null, link: LinkView): UiMode {
+  return link.kind === 'open' && frame?.ui ? frame.ui.mode : 'hud'
+}
+
 export function renderHud({ frame, link, now, frameAgeMs }: HudInput): string {
   const body: string[] = []
+  const mode = currentMode(frame, link)
   if (link.kind === 'open' && frame) {
-    if (frame.position) body.push(...positionLines(frame.position, frame.view.index, frame.view.count))
-    else body.push(...referenceLines(frame))
+    body.push(...screenLines(frame))
     const feed = feedLine(frame, frameAgeMs)
     if (feed) body.push(feed)
   } else {
     body.push(...linkLines(link))
   }
-  const lines = [headerLine(now), ...body, SEPARATOR, FOOTER]
-  return lines.slice(0, MAX_LINES).map(fit).join('\n')
+  const footer = link.kind === 'open' ? FOOTERS[mode] : FOOTERS.link
+  const lines = [headerLine(now), ...body.slice(0, BODY_LINES), SEPARATOR, footer]
+  return lines.map(fit).join('\n')
+}
+
+/** Word-wrap to `width` columns (long words are hard-split). */
+export function wrap(text: string, width: number): string[] {
+  const out: string[] = []
+  let line = ''
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    let w = word
+    while (w.length > width) {
+      if (line) out.push(line)
+      line = ''
+      out.push(w.slice(0, width))
+      w = w.slice(width)
+    }
+    if (!line) line = w
+    else if (line.length + 1 + w.length <= width) line += ` ${w}`
+    else {
+      out.push(line)
+      line = w
+    }
+  }
+  if (line) out.push(line)
+  return out
 }
 
 /** Last line of defence: strip non-ASCII and truncate to MAX_COLS. */
