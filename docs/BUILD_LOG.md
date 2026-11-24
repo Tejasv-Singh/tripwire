@@ -1208,3 +1208,84 @@ to `.env` and restarted `backend:dev`.
   `/threshold` above a position's liquidation distance.
 - A *forwarded* (not typed) message: same handler, filter `TEXT | CAPTION`.
 - Business inbox and replies: need Premium.
+
+---
+
+## 2026-11-25 · Day 3
+
+Rules carried over: BUILD_LOG on every change, a commit per milestone, ask before pushing, no
+secrets, testnet only, reduce-only by default, two-tap confirm, no advice. Testnet funds are
+pending, so `DRY_RUN=true` and WATCH mode remain the real-data sources. Item 0 (push `c4c4b27`)
+was already done at the end of Day 2; `origin/main` contains it.
+
+### 23. Go-live readiness: `golive:check`, GO_LIVE.md, stop-loss payload audit (item 1)
+
+**Payload audit against hyperliquid-python-sdk's own examples** (`examples/basic_tpsl.py`,
+`examples/rounding.py`, fetched from GitHub; they aren't in the installed package). Two fixes and
+one open point:
+
+1. **Bug: a stop-loss's limit price was equal to its trigger.**
+   - The SDK's example gives a market stop a limit *past* the trigger (sell stop: trigger 2600,
+     limit 2500).
+   - With limit = trigger, a price that gaps through the stop can't fill it, so the stop fails
+     exactly when it's needed.
+   - Fix: `trigger_limit_px()` = trigger −10 % for sells, +10 % for buys (the Hyperliquid UI's
+     TP/SL market slippage, `TRIGGER_SLIPPAGE`), rounded to a valid tick.
+   - Used for `set_sl` and for the SL and TP legs of `place_order`. Example:
+     `{"t":{"trigger":{"triggerPx":"3412",...}}, "p":"3070.8"}`.
+2. **Rounding above 100,000.** `rounding.py` says any integer price is valid above 100k. Our
+   5-significant-figure rounding turned BTC 105,432.7 into 105,430. `round_px` now rounds to an
+   integer above 100k.
+3. **Bug found by a new property test:** a price below the smallest tick (0.004 with
+   szDecimals 5 → 1 decimal) rounded to **0.0**. No real asset has that combination, but
+   `round_px` now raises instead of ever producing a zero price.
+4. **Open point:** `positionTpsl` isn't covered by the SDK examples. We still send the position
+   size, not `0`. It's step 6 of `docs/GO_LIVE.md`, the first thing to watch live, with the
+   one-line change if it's rejected.
+
+New helpers in `trading.py`: `is_valid_px`, `is_valid_sz`, `trigger_limit_px`, `TRIGGER_SLIPPAGE`.
+Lot sizes come from testnet meta (2026-11-25): BTC 5, ETH 4, SOL 2, DOGE 0, out of 213 perps.
+
+**`npm run golive:check`** (`scripts/golive_check.py` → `src/tripwire/golive.py`), in order:
+
+| # | Check | How |
+|---|---|---|
+| 1 | `HL_ACCOUNT_ADDRESS` + `HL_AGENT_KEY` present | format validated by `Settings` |
+| 2 | agent authorized for the account | `/info userRole(agent)` → `{"role":"agent","data":{"user":<account>}}`, else `extraAgents(account)` with an unexpired `validUntil` |
+| 3 | testnet USDC > $20 | `clearinghouseState.marginSummary.accountValue` + spot `USDC.total`; hints when it's all in spot |
+| 4 | URL guard | `assert_testnet(HL_API_URL)` passes **and** refuses the mainnet URL |
+| 5 | $15 order signs and validates | with DRY_RUN **forced on**: the real adapter builds a $15 ETH IOC market buy plus a stop 5 % below; `validate_order_action` checks ticks and lots per asset, reduce-only trigger legs, tif and grouping, the $10 minimum, and that **the SDK re-encodes the wire identically**; every signature must **recover to the signer for testnet** |
+
+How it reports:
+- A check whose input is missing is **SKIP**, not FAIL, so the FAIL list names only real
+  problems.
+- It prints the list, then `Result:`, `Failed:` and `Next:` (the exact next command), and exits
+  1 unless everything passes.
+- Only public `/info` endpoints are called. The adapter now keeps its last 50 dry-run payloads in
+  memory (`dry_run_records`) so the check can inspect exactly what was signed.
+
+**Today's real run** (no account yet):
+```
+ 1. FAIL  Account + agent key in .env   HL_ACCOUNT_ADDRESS is empty; HL_AGENT_KEY is empty
+ 2. SKIP  Agent authorized for the account   needs both values from check 1
+ 3. SKIP  Testnet USDC > $20   needs HL_ACCOUNT_ADDRESS (funds not checked)
+ 4. PASS  Testnet URL guard
+ 5. PASS  $15 order signs and validates (DRY RUN)   buy 0.0089 ETH IOC limit 1762.5 (~$14.94)
+          + stop 1594.6 (limit 1435.1); valid ticks/lots, SDK-identical wire, signature
+          recovers on testnet (throwaway key)
+Result: FAIL - 1 failed, 2 skipped, 2 passed.  DRY_RUN in .env: true
+Next: Put your MAIN testnet address in HL_ACCOUNT_ADDRESS and the API wallet's private key ...
+```
+
+**`docs/GO_LIVE.md`:** the live sequence, with what to check on the glasses and in the testnet UI
+at every step: keys → `golive:check` → a dry-run close on the glasses → `DRY_RUN=false` → **Close
+25 %** → **SL to breakeven** (the `positionTpsl` step, with the fallback) → a **forwarded ~$15
+open with SL** (plus one deliberate over-limit block) → wrap up.
+
+**Checks:** **307 backend tests pass**:
+- `test_payload_audit.py`, 22: SDK rounding examples, a property test over 2,000 prices,
+  per-asset lots, trigger slippage on both sides, **our stop wire == the SDK's
+  `order_request_to_order_wire` for `basic_tpsl.py`'s request**, SL and open-leg payloads.
+- `test_golive.py`, 18: the validator against 8 kinds of tampering, every agent and funds
+  outcome, the guard, the payload with agent and with throwaway key, and the full reports for
+  "nothing configured", "funds missing" and "all ready".

@@ -37,10 +37,43 @@ def round_size_down(size: float, decimals: int) -> float:
     return float(Decimal(repr(size)).quantize(quantum, rounding=ROUND_DOWN))
 
 
+PERP_MAX_DECIMALS = 6  # prices: <= 5 significant figures and <= 6 - szDecimals decimals
+# Limit price of a MARKET trigger (stop-loss / take-profit) = trigger -+ this. The SDK's
+# examples/basic_tpsl.py puts a sell stop's limit below its trigger (2500 vs 2600) for the same
+# reason: if price gaps through the trigger, a limit AT the trigger cannot fill and the stop
+# fails exactly when it is needed. 10 % matches the Hyperliquid UI's TP/SL market slippage.
+TRIGGER_SLIPPAGE = 0.10
+
+
 def round_px(px: float, sz_decimals: int) -> float:
-    """Hyperliquid perp price rules: at most 5 significant figures and at most
-    (6 - szDecimals) decimals -- the same rounding as the SDK's Exchange._slippage_price."""
-    return round(float(f"{px:.5g}"), max(0, 6 - sz_decimals))
+    """Hyperliquid perp price rules (SDK examples/rounding.py): above 100,000 any integer is
+    valid; otherwise at most 5 significant figures and at most (6 - szDecimals) decimals."""
+    if px > 100_000:
+        return float(round(px))
+    rounded = round(float(f"{px:.5g}"), max(0, PERP_MAX_DECIMALS - sz_decimals))
+    if rounded <= 0:  # below the smallest tick: never sign a zero price
+        raise ValueError(f"price {px!r} is below the smallest tick for szDecimals={sz_decimals}")
+    return rounded
+
+
+def is_valid_px(px: float, sz_decimals: int) -> bool:
+    """True if the exchange accepts this perp price as-is (no rounding needed)."""
+    try:
+        return px > 0 and round_px(px, sz_decimals) == px
+    except ValueError:
+        return False
+
+
+def is_valid_sz(sz: float, sz_decimals: int) -> bool:
+    """True if `sz` is a positive multiple of the coin's lot (10 ** -szDecimals)."""
+    return sz > 0 and round_size_down(sz, sz_decimals) == sz
+
+
+def trigger_limit_px(trigger_px: float, is_buy: bool, sz_decimals: int) -> float:
+    """Worst acceptable fill price for a market trigger order: a buy may pay up to +10 %,
+    a sell may receive down to -10 %, rounded to a valid tick."""
+    raw = trigger_px * (1 + TRIGGER_SLIPPAGE) if is_buy else trigger_px * (1 - TRIGGER_SLIPPAGE)
+    return round_px(raw, sz_decimals)
 
 
 def short_message(text: str) -> str:

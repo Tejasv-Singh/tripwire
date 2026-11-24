@@ -17,7 +17,8 @@ the public /info endpoint, so asset ids, lot sizes and tick rounding are the rea
 Order shapes (all reduce-only except the opening leg of place_order):
   close_reduce_only  IOC limit at mid ± 5 % for `size` (rounded down to szDecimals), reduce_only
   set_sl             trigger {isMarket: true, tpsl: "sl"} for the position size, reduce_only,
-                     grouping "positionTpsl"; THEN cancel the old SL (placing first means the
+                     grouping "positionTpsl", limit px = trigger -+ 10 % (slippage room, as in the
+                     SDK's examples/basic_tpsl.py); THEN cancel the old SL (placing first means the
                      position is never left without a stop if the new one is rejected)
   place_order        updateLeverage (cross), then entry (GTC limit at entry, or IOC at mid ± 5 %)
                      + SL trigger (+ TP trigger) as one action, grouping "normalTpsl"
@@ -32,6 +33,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
@@ -50,6 +52,7 @@ from tripwire.trading import (
     round_px,
     round_size_down,
     short_message,
+    trigger_limit_px,
 )
 
 log = logging.getLogger(__name__)
@@ -130,6 +133,7 @@ class HyperliquidAdapter:
         self.signer_kind = ""  # "agent" | "throwaway"
         self.dry_run = dry_run
         self.dry_run_log = dry_run_log
+        self.dry_run_records: deque[dict[str, Any]] = deque(maxlen=50)  # golive:check reads these
         if agent_key or dry_run:
             import eth_account
 
@@ -257,6 +261,9 @@ class HyperliquidAdapter:
             separators=(",", ":"),
         )
         log.info("DRY RUN (signed, NOT sent) %s: %s", what, line)
+        self.dry_run_records.append(
+            {"what": what, "signer": self.agent_address, "payload": payload}
+        )
         if self.dry_run_log is not None:
             self.dry_run_log.parent.mkdir(parents=True, exist_ok=True)
             with self.dry_run_log.open("a", encoding="utf-8") as fh:
@@ -325,8 +332,10 @@ class HyperliquidAdapter:
             asset = info.name_to_asset(order.coin)
             trig = round_px(order.trigger_px, decimals)
             sz = round_size_down(p.size, decimals)
+            is_buy = p.side == "SHORT"  # a short's stop buys back
             stop_type = {"trigger": {"triggerPx": trig, "isMarket": True, "tpsl": "sl"}}
-            wire = _wire(asset, p.side == "SHORT", sz, trig, stop_type, True)
+            limit = trigger_limit_px(trig, is_buy, decimals)  # slippage room, see trading.py
+            wire = _wire(asset, is_buy, sz, limit, stop_type, True)
             placed = parse_order_response(
                 await self._submit(_order_action([wire], "positionTpsl"), f"SL {order.coin} {trig}")
             )
@@ -389,7 +398,8 @@ class HyperliquidAdapter:
                     continue
                 t = round_px(trigger, decimals)
                 trigger_type = {"trigger": {"triggerPx": t, "isMarket": True, "tpsl": kind}}
-                legs.append(_wire(asset, not is_buy, sz, t, trigger_type, True))
+                limit = trigger_limit_px(t, not is_buy, decimals)
+                legs.append(_wire(asset, not is_buy, sz, limit, trigger_type, True))
             what = f"open {order.side} {order.coin} {sz}"
             return parse_order_response(await self._submit(_order_action(legs, "normalTpsl"), what))
 
