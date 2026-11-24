@@ -28,7 +28,7 @@ describe('commandFromEvent', () => {
   })
 
   it('double tap backs out of menu / confirm / result instead of exiting', () => {
-    for (const mode of ['menu', 'confirm', 'sending', 'result'] as const) {
+    for (const mode of ['menu', 'confirm', 'sending', 'result', 'reply'] as const) {
       expect(commandFromEvent(sys(OsEventTypeList.DOUBLE_CLICK_EVENT), mode)).toEqual({
         kind: 'intent',
         action: 'back',

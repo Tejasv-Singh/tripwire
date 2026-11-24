@@ -246,6 +246,21 @@ describe('action screens', () => {
     assertFits(at({ ...open, entry: null, size: null }))
   })
 
+  it('shows new Telegram Business messages as one HUD line', () => {
+    const lines = at({ mode: 'hud' }, { inbox: { count: 2, from: '@alice', preview: 'still in ETH or did you cl' } })
+      .split('\n')
+    expect(lines[4]).toBe('TG 2 new @alice: still in ETH or did you cl')
+    expect(at({ mode: 'hud' }, { inbox: null })).not.toContain('TG ')
+  })
+
+  it('renders the reply offer after a fill', () => {
+    const reply: UiState = { mode: 'reply', coin: 'ETH', to: '@alice', text: 'Trimmed half of my ETH.', source: 'template' }
+    const lines = at(reply).split('\n')
+    expect(lines.slice(1, 4)).toEqual(['REPLY to @alice on Telegram?', '"Trimmed half of my ETH."', 'drafted from a template'])
+    expect(lines.at(-1)).toBe('tap: send reply  2x: skip')
+    assertFits(at({ ...reply, text: 'x'.repeat(60), to: '@' + 'y'.repeat(40) }))
+  })
+
   it('renders the RISK alert screen with its four actions', () => {
     const alert: UiState = {
       mode: 'menu', kind: 'alert', coin: 'ETH', items: ['Move SL', 'Close 50%', 'Close all', 'Snooze 5m'],

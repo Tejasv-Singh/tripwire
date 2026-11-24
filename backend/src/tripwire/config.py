@@ -55,7 +55,10 @@ class Settings(BaseSettings):
     watch_address: str = ""
     hl_agent_key: SecretStr = SecretStr("")  # API/agent wallet key; empty -> trading off
     telegram_bot_token: SecretStr = SecretStr("")  # empty -> bot skipped
-    anthropic_api_key: SecretStr = SecretStr("")  # unused on Day 1
+    anthropic_api_key: SecretStr = SecretStr("")  # not used (no Anthropic key: see BUILD_LOG §19)
+    # Reply drafts after a fill (replies.py). Empty key -> templates only.
+    openrouter_api_key: SecretStr = SecretStr("")
+    openrouter_model: str = "google/gemma-4-31b-it:free"
     pairing_code: SecretStr  # required: the plugin must present it as /ws?code=...
 
     # Your own numeric Telegram user id: only this user may use /kill, /status, forwarded order

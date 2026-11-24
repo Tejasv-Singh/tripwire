@@ -6,7 +6,9 @@ Day 1 behaviour:
   /threshold [pct]          -> owner only: show / set the liquidation-alert threshold (risk.py)
   send_owner(text)          -> DM the owner (risk alerts when no glasses are connected)
   business_connection       -> log metadata + upsert into SQLite (who connected, enabled, can reply)
-  business_message          -> log metadata ONLY (ids, length) — text is never logged or stored
+  business_message          -> log metadata ONLY (ids, length) — text is never logged or stored;
+                               the first 30 characters go to the in-memory Inbox for the HUD line
+  /status                   -> owner only: positions + uPnL, trading mode, kill switch, alerts
   forwarded / typed text    -> owner only: parse into an order draft (drafts.py), run the policy
                                guard, show it on the glasses for the two-tap confirm
 
@@ -42,6 +44,7 @@ from telegram.ext import (
 
 from tripwire.db import Store
 from tripwire.drafts import DraftError, OrderDraft, parse_draft
+from tripwire.inbox import Inbox
 from tripwire.policy import Decision, KillSwitch
 from tripwire.risk import AlertService
 
@@ -87,6 +90,8 @@ class BotServices:
     push_draft: Callable[[OrderDraft, Decision], int] | None = None
     default_notional: float = 100.0
     default_leverage: float = 1.0
+    inbox: Inbox | None = None  # business messages -> HUD line (memory only)
+    status_text: Callable[[], str] | None = None  # /status
 
 
 def is_owner(update: Update, services: BotServices | None) -> bool:
@@ -222,21 +227,51 @@ def make_business_connection_handler(
     return BusinessConnectionHandler(on_business_connection)
 
 
-async def on_business_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.business_message or update.edited_business_message
-    if msg is None:
-        return
-    text = msg.text or msg.caption or ""
-    # Metadata only. Do NOT log `text` — privacy rule: no message retention.
-    log.info(
-        "business_message conn=%s chat=%s msg=%s edited=%s has_text=%s len=%d",
-        msg.business_connection_id,
-        msg.chat_id,
-        msg.message_id,
-        update.edited_business_message is not None,
-        bool(text),
-        len(text),
-    )
+def make_business_message_handler(services: BotServices | None) -> MessageHandler[Any, None]:
+    async def on_business_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.business_message or update.edited_business_message
+        if msg is None:
+            return
+        text = msg.text or msg.caption or ""
+        # Metadata only. Do NOT log `text` — privacy rule: no message retention.
+        log.info(
+            "business_message conn=%s chat=%s msg=%s edited=%s has_text=%s len=%d",
+            msg.business_connection_id,
+            msg.chat_id,
+            msg.message_id,
+            update.edited_business_message is not None,
+            bool(text),
+            len(text),
+        )
+        sender = msg.from_user
+        own = sender is not None and services is not None and sender.id == services.owner_id
+        new = update.business_message is not None
+        if services is None or services.inbox is None or own or not new or not text:
+            return
+        name = "?"
+        if sender is not None:
+            name = f"@{sender.username}" if sender.username else (sender.first_name or "?")
+        services.inbox.add(
+            connection_id=str(msg.business_connection_id),
+            chat_id=msg.chat_id,
+            name=name,
+            text=text,  # Inbox keeps only the first 30 characters, in memory
+        )
+
+    return MessageHandler(filters.UpdateType.BUSINESS_MESSAGES, on_business_message)
+
+
+def make_status_handler(services: BotServices | None) -> CommandHandler[Any, None]:
+    async def on_status(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        if msg is None:
+            return
+        if not is_owner(update, services) or services is None or services.status_text is None:
+            await msg.reply_text("Not authorized.")
+            return
+        await msg.reply_text(services.status_text())
+
+    return CommandHandler("status", on_status, filters=filters.UpdateType.MESSAGE)
 
 
 DRAFT_HEADER = "FORWARDED - your instruction, not advice"
@@ -318,7 +353,8 @@ def build_application(
         app.add_handler(handler)
     app.add_handler(make_threshold_handler(services))
     app.add_handler(make_business_connection_handler(store))
-    app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGES, on_business_message))
+    app.add_handler(make_business_message_handler(services))
+    app.add_handler(make_status_handler(services))
     app.add_handler(make_draft_handler(services))
     return app
 
@@ -419,6 +455,19 @@ class TelegramBot:
             await self._app.bot.send_message(chat_id=self.owner_id, text=text)
         except TelegramError as exc:
             log.warning("Telegram DM to owner failed: %s: %s", type(exc).__name__, exc)
+            return False
+        return True
+
+    async def send_business_reply(self, connection_id: str, chat_id: int, text: str) -> bool:
+        """Answer in a business chat AS the user (needs the "reply to messages" right)."""
+        if self.status != "running" or self._app is None:
+            return False
+        try:
+            await self._app.bot.send_message(
+                chat_id=chat_id, text=text, business_connection_id=connection_id
+            )
+        except TelegramError as exc:
+            log.warning("business reply failed: %s: %s", type(exc).__name__, exc)
             return False
         return True
 

@@ -3,7 +3,16 @@
 // RISK_GLYPH, the one non-ASCII character allowed (it heads the liquidation alert screen).
 // The G2 font is proportional, so column padding is approximate on the real display.
 
-import type { HudFrame, MenuScreen, OrderScreen, Position, ResultScreen, ResultStatus, UiMode } from './protocol'
+import type {
+  HudFrame,
+  MenuScreen,
+  OrderScreen,
+  Position,
+  ReplyScreen,
+  ResultScreen,
+  ResultStatus,
+  UiMode,
+} from './protocol'
 
 export const MAX_COLS = 46
 export const MAX_LINES = 9
@@ -18,6 +27,7 @@ export const FOOTERS: Record<UiMode | 'link' | 'watch', string> = {
   confirm: 'tap: SEND  swipe/2x: cancel',
   sending: 'sending... please wait',
   result: 'tap/swipe/2x: back to HUD',
+  reply: 'tap: send reply  2x: skip',
   link: 'tap: actions  swipe: next  2x: exit',
   watch: 'watch only  swipe: next  2x: exit', // WATCH_ADDRESS: the menu is disabled
 }
@@ -247,6 +257,17 @@ function resultLines(ui: ResultScreen): string[] {
   return [`${RESULT_TITLES[ui.status]}  ${what}`.trimEnd(), ...wrap(ui.message, MAX_COLS).slice(0, 3)]
 }
 
+/** "TG 1 new @alice: still in ETH?" -- Telegram Business messages of the last 10 minutes. */
+export function inboxLine(f: HudFrame): string | null {
+  const i = f.inbox
+  return i && i.count > 0 ? `TG ${i.count} new ${i.from}: ${i.preview}` : null
+}
+
+function replyLines(ui: ReplyScreen): string[] {
+  const by = ui.source === 'openrouter' ? 'drafted by OpenRouter' : 'drafted from a template'
+  return [`REPLY to ${ui.to} on Telegram?`, ...wrap(`"${ui.text}"`, MAX_COLS).slice(0, 2), by]
+}
+
 function screenLines(f: HudFrame): string[] {
   const ui = f.ui ?? { mode: 'hud' }
   switch (ui.mode) {
@@ -258,8 +279,13 @@ function screenLines(f: HudFrame): string[] {
       return sendingLines(ui)
     case 'result':
       return resultLines(ui)
-    case 'hud':
-      return f.position ? positionLines(f.position, f.view.index, f.view.count) : referenceLines(f)
+    case 'reply':
+      return replyLines(ui)
+    case 'hud': {
+      const lines = f.position ? positionLines(f.position, f.view.index, f.view.count) : referenceLines(f)
+      const tg = inboxLine(f)
+      return tg ? [...lines, tg] : lines
+    }
   }
 }
 

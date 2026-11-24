@@ -18,13 +18,13 @@ import asyncio
 import contextlib
 import logging
 import secrets
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any, Literal
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, ValidationError
 
-from tripwire.actions import ActionFlow
+from tripwire.actions import REPLY_HOLD_S, ActionFlow, ReplyOffer
 from tripwire.db import Store
 from tripwire.drafts import OrderDraft
 from tripwire.exchanges.base import ExchangeAdapter
@@ -36,8 +36,10 @@ from tripwire.hud import (
     next_send_delay,
     resolve_index,
 )
+from tripwire.inbox import Inbox, ReplyTarget
 from tripwire.orders import Order, OrderResult, OrderService
 from tripwire.policy import Decision, PolicyGuard
+from tripwire.replies import ReplyContext, ReplyDrafter
 from tripwire.risk import Alert
 from tripwire.state import MarketState
 
@@ -108,6 +110,10 @@ class ClientHub:
         self.pending_draft = None if self.sessions else (draft, decision, now)
         return len(self.sessions)
 
+    def wake_all(self) -> None:
+        for session in list(self.sessions):
+            session.wake()
+
     def take_pending_draft(self, now: float) -> tuple[OrderDraft, Decision] | None:
         pending, self.pending_draft = self.pending_draft, None
         if pending is None or now - pending[2] > PENDING_DRAFT_S:
@@ -125,6 +131,9 @@ def make_ws_router(
     guard: PolicyGuard,
     orders: OrderService,
     on_snooze: Callable[[str, str, float], None] | None = None,
+    inbox: Inbox | None = None,
+    replier: ReplyDrafter | None = None,
+    send_reply: Callable[[ReplyTarget, str], Awaitable[bool]] | None = None,
     min_interval_s: float = MIN_INTERVAL_S,
     heartbeat_s: float = HEARTBEAT_S,
 ) -> APIRouter:
@@ -201,6 +210,39 @@ def make_ws_router(
         task.add_done_callback(order_tasks.discard)
         task.add_done_callback(_log_task_failure)
 
+    async def offer_reply(
+        session: ClientSession, req: Order, result: OrderResult, result_token: int
+    ) -> None:
+        """After a real fill: draft a <= 60-char reply to the last business chat and offer it."""
+        target = inbox.reply_target() if inbox is not None else None
+        if target is None or replier is None or send_reply is None:
+            return
+        ctx = ReplyContext(
+            kind=req.kind,
+            coin=req.coin,
+            side=req.side,
+            fraction=req.fraction if req.kind == "close" else None,
+            price=result.avg_px,
+            sl=req.trigger_px if req.kind == "stop" else None,
+        )
+        text, source = await replier.draft(ctx)
+        token = session.flow.offer_reply(ReplyOffer(target, text, source), result_token)
+        if token is not None and session.connected:
+            schedule(session, REPLY_HOLD_S, token)
+            session.wake()
+
+    async def deliver_reply(ws: WebSocket, session: ClientSession, offer: ReplyOffer) -> None:
+        ok = False
+        if send_reply is not None:
+            try:
+                ok = await send_reply(offer.target, offer.text)
+            except Exception:
+                log.exception("reply send failed")
+        log.info("business reply to %s: %s", offer.target.name, "sent" if ok else "FAILED")
+        if session.connected:
+            with contextlib.suppress(Exception):
+                await send(ws, session, {"type": "reply", "ok": ok, "to": offer.target.name})
+
     async def run_order(ws: WebSocket, session: ClientSession, req: Order) -> None:
         try:
             result = await orders.submit(  # policy guard, then the exchange
@@ -212,6 +254,8 @@ def make_ws_router(
         out = session.flow.finish(result)
         if out.timer_s is not None and session.connected:
             schedule(session, out.timer_s, out.token)
+        if result.ok and result.status in ("filled", "placed"):  # a real change, not a dry run
+            spawn(session, offer_reply(session, req, result, out.token), "reply-draft")
         fraction = req.fraction if req.kind == "close" else None
         size = req.size if req.kind == "close" else None
         log.info("order %s %s from %s -> %s", req.kind, req.coin, session.client, result.status)
@@ -270,6 +314,7 @@ def make_ws_router(
                 ui=session.flow.ui(loop.time(), trading=trading_on()),
                 lock_coin=session.flow.coin,
                 trading=trading_info(),
+                inbox=inbox.summary() if inbox is not None else None,
             )
             session.index = frame["view"]["index"]  # clamp / follow the locked coin
             await send(ws, session, frame)
@@ -307,6 +352,8 @@ def make_ws_router(
                 spawn(session, load_stop(session, out.fetch_stop), "stop-lookup")
             if out.snooze is not None and on_snooze is not None:
                 on_snooze(out.snooze[0], out.snooze[1], loop.time())
+            if out.send_reply is not None:
+                spawn(session, deliver_reply(ws, session, out.send_reply), "reply-send")
             log.info(
                 "intent %s from %s -> mode=%s index=%d/%d%s",
                 intent.action,

@@ -54,6 +54,8 @@ link = new BackendLink({
     } else if (f.type === 'order') {
       const pct = f.fraction != null ? ` ${Math.round(f.fraction * 100)}%` : ''
       logLine(`ORDER ${f.kind ?? 'close'} ${f.coin}${pct}: ${f.status} - ${f.message}`)
+    } else if (f.type === 'reply') {
+      logLine(f.ok ? `reply sent to ${f.to}` : `reply to ${f.to} FAILED`)
     } else if (f.type === 'error') logLine(`backend error: ${f.error}`)
     else if (f.type === 'hello') {
       const mismatch = f.v !== PROTOCOL_VERSION ? ` (plugin speaks v${PROTOCOL_VERSION}!)` : ''

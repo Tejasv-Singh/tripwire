@@ -18,6 +18,10 @@ Intents: next | prev | tap | back   (plugin: swipe down/up, tap, double tap)
            timer      -> that menu, note "Confirm expired - not sent"
   sending  anything   -> ignored ("busy"); the caller calls finish() with the OrderResult
   result   anything   -> hud                 timer (RESULT_HOLD_S) -> hud
+           (after a real fill, if a business chat wrote recently, the result screen is replaced
+            by a reply offer as soon as the draft text is ready -- offer_reply())
+  reply    tap        -> send the drafted reply (caller does it)    back -> skip
+           next/prev  -> nothing                                     timer (REPLY_HOLD_S) -> hud
 
 Menus (`kind`):
   actions  Close 25% | Close 50% | Close 100% | Move SL... | Back       (all reduce risk)
@@ -45,6 +49,7 @@ from typing import Any, Literal
 from tripwire.drafts import OrderDraft
 from tripwire.exchanges.base import StopInfo
 from tripwire.hl.positions import Position
+from tripwire.inbox import ReplyTarget
 from tripwire.orders import CloseOrder, OpenOrder, Order, OrderResult, ResultStatus, StopOrder
 from tripwire.policy import Decision
 from tripwire.risk import Alert
@@ -54,13 +59,14 @@ from tripwire.trading import SLIPPAGE, round_px, round_size_down
 # blocked order is refused BEFORE the confirm screen. OrderService.submit() checks again.
 Precheck = Callable[[Order], Decision]
 
-Mode = Literal["hud", "menu", "confirm", "sending", "result"]
+Mode = Literal["hud", "menu", "confirm", "sending", "result", "reply"]
 MenuKind = Literal["actions", "sl", "alert", "draft"]
 Intent = Literal["next", "prev", "tap", "back"]
 
 CONFIRM_WINDOW_S = 5.0  # second tap must land within this many seconds of the first
 MIN_CONFIRM_GAP_S = 0.3  # ...and not sooner than this (a bounced/duplicated tap is not a confirm)
 RESULT_HOLD_S = 8.0  # result screen returns to the HUD by itself after this long
+REPLY_HOLD_S = 20.0  # an unanswered reply offer is skipped after this long
 SL_TIGHTEN_PCT = 1.0  # "SL tighter 1%": move the stop this % of mark toward the price
 
 
@@ -108,6 +114,13 @@ class Armed:
     from_kind: MenuKind  # swipe-cancel returns here
 
 
+@dataclass(frozen=True, slots=True)
+class ReplyOffer:
+    target: ReplyTarget
+    text: str
+    source: str  # "openrouter" | "template"
+
+
 @dataclass(slots=True)
 class StopState:
     coin: str
@@ -127,6 +140,7 @@ class Outcome:
     token: int = 0
     fetch_stop: str | None = None  # load this coin's current SL, then call set_stop()
     snooze: tuple[str, str] | None = None  # (coin, side): snooze this alert in the risk engine
+    send_reply: ReplyOffer | None = None  # the user tapped "send" on a reply offer
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -146,6 +160,7 @@ class ActionFlow:
         self.draft: OrderDraft | None = None  # the forwarded draft on screen (kind "draft")
         self.draft_decision: Decision | None = None  # the policy guard's verdict on it
         self.pending_draft: tuple[OrderDraft, Decision] | None = None
+        self.reply: ReplyOffer | None = None  # mode "reply"
         self.token = 0  # bumped on every transition; stale timers compare and do nothing
 
     # --- transitions -------------------------------------------------------------------------
@@ -163,7 +178,7 @@ class ActionFlow:
         if mode == "hud":
             self.coin, self.armed, self.result, self.cursor = None, None, None, 0
             self.kind, self.parent, self.stop, self.alert = "actions", "actions", None, None
-            self.draft, self.draft_decision = None, None
+            self.draft, self.draft_decision, self.reply = None, None, None
         if mode == "menu":
             self.armed, self.result = None, None
         return self.token
@@ -283,9 +298,27 @@ class ActionFlow:
         if self.mode == "sending":
             return Outcome(ok=False, note="busy - order in flight")
 
+        if self.mode == "reply":
+            offer = self.reply
+            if intent == "tap" and offer is not None:
+                self._go("hud")
+                return Outcome(send_reply=offer, note=f"sending reply to {offer.target.name}")
+            if intent == "back":
+                self._go("hud")
+                return Outcome(note="reply skipped")
+            return Outcome(note="tap: send  2x: skip")
+
         # result
         self._go("hud")
         return Outcome()
+
+    def offer_reply(self, offer: ReplyOffer, result_token: int) -> int | None:
+        """Replace the result screen with a reply offer -- only if the user is still looking at
+        the result this offer belongs to. Returns the new token (for the REPLY_HOLD_S timer)."""
+        if self.mode != "result" or self.token != result_token:
+            return None
+        self.reply = offer
+        return self._go("reply")
 
     def _back_to(self, kind: MenuKind, *, note: str) -> None:
         self.kind = kind
@@ -450,7 +483,7 @@ class ActionFlow:
         if self.mode == "confirm" and self.armed is not None:
             self._back_to(self.armed.from_kind, note="Confirm expired - not sent")
             return True
-        if self.mode == "result":
+        if self.mode in ("result", "reply"):
             self._go("hud")
             return True
         return False
@@ -489,6 +522,8 @@ class ActionFlow:
                 expires_in_ms=max(0, int((a.armed_at + CONFIRM_WINDOW_S - now) * 1000)),
                 **a.view,
             )
+        elif self.mode == "reply" and self.reply is not None:
+            base.update(to=self.reply.target.name, text=self.reply.text, source=self.reply.source)
         elif self.mode == "result" and self.result is not None:
             r = self.result
             base.update(

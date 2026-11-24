@@ -22,8 +22,10 @@ from tripwire.drafts import OrderDraft
 from tripwire.exchanges.base import ExchangeAdapter
 from tripwire.exchanges.hyperliquid import HyperliquidAdapter
 from tripwire.hl.feed import HyperliquidFeed
+from tripwire.inbox import Inbox, ReplyTarget
 from tripwire.orders import OrderService
 from tripwire.policy import Decision, KillSwitch, PolicyGuard, PolicyLimits
+from tripwire.replies import ReplyDrafter
 from tripwire.risk import AlertService, RiskEngine
 from tripwire.state import MarketState
 from tripwire.telegram_bot import BotServices, TelegramBot, build_application
@@ -31,11 +33,13 @@ from tripwire.ws import ClientHub, make_ws_router
 
 log = logging.getLogger("tripwire")
 KNOWN_COINS_MIN = 20  # allMids lists ~200 perps on testnet; fewer means "not loaded yet"
+STATUS_MAX_POSITIONS = 20  # /status lists at most this many (Telegram messages max 4096 chars)
 
 
 _SECRET_PATTERNS = [
     (re.compile(r"(code=)[^&\s\"']+"), r"\1***"),  # /ws?code=<PAIRING_CODE> in access logs
     (re.compile(r"(bot)\d+:[A-Za-z0-9_-]+"), r"\1***"),  # Telegram token inside API URLs
+    (re.compile(r"sk-or-[A-Za-z0-9_-]+"), "sk-or-***"),  # OpenRouter key, if it ever shows up
 ]
 
 
@@ -70,6 +74,51 @@ def configure_logging(level: str) -> None:
         lg = logging.getLogger(name)
         if not any(isinstance(f, RedactSecretsFilter) for f in lg.filters):
             lg.addFilter(RedactSecretsFilter())
+
+
+def format_status(
+    state: MarketState, adapter: ExchangeAdapter, guard: PolicyGuard, alerts: AlertService
+) -> str:
+    """The /status reply: mode, trading, policy, alerts, then every position with uPnL."""
+    mode = {
+        "account": "own account",
+        "watch": f"WATCH {state.account_short} (read-only)",
+        "price": "price only (no account)",
+    }[state.mode]
+    if not adapter.can_trade:
+        trading = f"off ({adapter.detail})"
+    else:
+        trading = (
+            "DEMO (in-memory fake exchange)"
+            if adapter.name == "fake"
+            else "DRY RUN (signed, not sent)"
+            if adapter.dry_run
+            else "LIVE on testnet"
+        )
+    kill = "ON" if guard.kill_switch.engaged else "off"
+    lines = [
+        "Tripwire status (Hyperliquid TESTNET)",
+        f"Positions: {mode}  |  Trading: {trading}",
+        f"Kill switch: {kill}  |  Alerts at {alerts.engine.threshold_pct:g}% liq distance",
+    ]
+    positions = state.positions
+    if not positions:
+        lines.append("No open positions.")
+    for p in positions[:STATUS_MAX_POSITIONS]:
+        liq = (
+            f"liq {p.liq_px:,.6g} ({p.liq_dist_pct:.1f}%)"
+            if p.liq_px and p.liq_dist_pct
+            else "no liq"
+        )
+        lines.append(
+            f"{p.coin}-PERP {p.side} {p.size:g} @ {p.entry:,.6g}  mark {p.mark:,.6g}  "
+            f"uPnL {p.upnl:+,.2f} ({p.upnl_pct:+.1f}%)  {liq}"
+        )
+    if len(positions) > STATUS_MAX_POSITIONS:
+        lines.append(f"... and {len(positions) - STATUS_MAX_POSITIONS} more")
+    if positions:
+        lines.append(f"Total uPnL: {sum(p.upnl for p in positions):+,.2f} USD")
+    return "\n".join(lines)
 
 
 def create_app(
@@ -148,6 +197,19 @@ def create_app(
     def push_draft(draft: OrderDraft, decision: Decision) -> int:
         return hub.push_draft(draft, decision, asyncio.get_running_loop().time())
 
+    inbox = Inbox(on_change=hub.wake_all)
+    replier = ReplyDrafter(
+        settings.openrouter_api_key.get_secret_value(), settings.openrouter_model
+    )
+
+    async def send_reply(target: ReplyTarget, text: str) -> bool:
+        return await bot.send_business_reply(target.connection_id, target.chat_id, text)
+
+    def status_text() -> str:
+        return format_status(state, adapter, guard, alerts)
+
+    bot_services.inbox = inbox
+    bot_services.status_text = status_text
     bot_services.known_coins = known_coins
     bot_services.check_draft = check_draft
     bot_services.push_draft = push_draft
@@ -205,6 +267,9 @@ def create_app(
             guard=guard,
             orders=orders,
             on_snooze=alerts.engine.snooze,
+            inbox=inbox,
+            replier=replier,
+            send_reply=send_reply,
             min_interval_s=min_interval_s,
             heartbeat_s=heartbeat_s,
         )
@@ -249,5 +314,7 @@ def create_app(
     app.state.guard = guard
     app.state.alerts = alerts
     app.state.bot_services = bot_services
+    app.state.inbox = inbox
+    app.state.replier = replier
     app.state.kill_switch = kill_switch
     return app

@@ -1052,3 +1052,66 @@ regression test covers it.
     fake; a 10x draft shows `BLOCKED: Leverage 10x > max 5x` with only Discard; a draft forwarded
     with no glasses appears on the next connect.
 - Plugin: 35 tests.
+
+### 20. Telegram depth, part 2: inbox HUD line, reply after a fill, /status (item 6)
+
+**Inbox (`inbox.py`), `TG 1 new @name: <first 30 chars>` on the HUD:**
+- A business message from someone other than the owner is reduced to its **first 30
+  characters**. That preview is kept **in memory only**, for 10 minutes (`WINDOW_S`). The rest
+  of the text is dropped when it arrives (a test checks the full text isn't kept). Nothing is
+  logged or written to SQLite, so the privacy rule still holds.
+- The owner's own messages and edits don't count.
+- The name is `@username`, else the first name. Non-ASCII becomes `?` on the glasses.
+- `hud` frames gain `inbox: {count, from, preview}` (or null). A new message wakes every client
+  (`ClientHub.wake_all`).
+- The inbox also remembers the **reply target** (business connection id, chat id, name; no
+  text) for 30 minutes.
+- **Needs Telegram Premium** to receive business messages for real (§11). Tested with fake
+  updates.
+
+**Reply after a fill (`replies.py`, flow mode `reply`):**
+- After a **real** change (`filled` / `placed`; never `dry_run` or `blocked`), and only if a
+  business chat wrote in the last 30 minutes, a draft is made and offered as soon as it's ready.
+  It replaces the result screen **only if the user is still looking at that result** (token
+  check).
+- Screen: `REPLY to @alice on Telegram?` / `"Trimmed half of my ETH."` /
+  `drafted from a template`. Footer `tap: send reply  2x: skip`. Swipes do nothing; it skips
+  itself after `REPLY_HOLD_S` = 20 s.
+- Tap → `TelegramBot.send_business_reply(connection_id, chat_id, text)` =
+  `send_message(..., business_connection_id=...)`, which answers *as the user* and needs the
+  "reply" right. The plugin gets a `{"type":"reply","ok":..,"to":..}` frame.
+
+How the draft text is made:
+- **Templates** (≤ 60 characters): `Trimmed half of my ETH.`, `Trimmed a quarter of my ETH.`,
+  `Closed my ETH long.`, `Moved my ETH stop to 1,700.`, `Opened a small BTC long.`, or
+  `..., SL moved to {sl}.` when both happened.
+- **OpenRouter** (if `OPENROUTER_API_KEY` is set): `POST https://openrouter.ai/api/v1/chat/completions`,
+  model `OPENROUTER_MODEL`. The default is `google/gemma-4-31b-it:free`, picked from the live
+  `/api/v1/models` list on 2026-11-24 (12 `:free` models existed); free models come and go.
+  - Timeout 8 s, `max_tokens` 40. The answer is cleaned (first line, no quotes) and must be
+    1–60 characters.
+  - **Any problem falls back to the template**: no key, 429 rate limit, 5xx, timeout, empty or
+    too long.
+- **Privacy:** OpenRouter gets only trade facts (`I just closed half of my ETH long at about
+  1,684.9.`), never chat text, names or ids. A test asserts the exact request body.
+- An `sk-or-...` key is redacted from logs like the bot token.
+
+**`/status` (owner only):**
+- Mode (own / WATCH / price only); trading (`LIVE on testnet` / `DRY RUN` / `DEMO` / `off
+  (reason)`); kill switch; alert threshold.
+- Then up to 20 positions (`ETH-PERP LONG 0.5 @ 3,412  mark 3,494.4  uPnL +41.20 (+2.4%)  liq
+  2,980 (14.7%)`) and the total uPnL.
+- Caught by a test: the fake exchange first showed as `LIVE`. It now says
+  `DEMO (in-memory fake exchange)`.
+
+**Checks:**
+- **268 backend tests pass** (+20, new `test_telegram_depth.py`):
+  - Inbox: 30 characters, window, reply target, own and edited messages ignored, name fallback.
+  - Six templates; cleaning.
+  - The OpenRouter request (URL, auth, model, **facts-only body**); fallback on 429 / 500 / too
+    long / empty; no request without a key.
+  - Reply screen: tap sends, 2x skips, a stale offer is dropped.
+  - `/status`: owner-only, and the exact text.
+  - **End to end:** inbox line on the HUD → Close 50% → filled → reply offer → tap → sent with
+    the right connection and chat.
+- Plugin: 37 tests (TG line, reply screen, 2x = back on the reply screen).

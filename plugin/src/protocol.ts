@@ -7,7 +7,7 @@ export type Side = 'LONG' | 'SHORT'
 export type MarkSource = 'markPx' | 'mid'
 /** v2: tap/back replace v1's "actions". The backend decides what a tap means on each screen. */
 export type IntentAction = 'next' | 'prev' | 'tap' | 'back'
-export type UiMode = 'hud' | 'menu' | 'confirm' | 'sending' | 'result'
+export type UiMode = 'hud' | 'menu' | 'confirm' | 'sending' | 'result' | 'reply'
 export type TradingStatus = 'off' | 'warming' | 'ready' | 'error'
 /** blocked = refused by the policy guard; dry_run = signed and logged, not sent */
 export type ResultStatus = 'filled' | 'resting' | 'placed' | 'rejected' | 'error' | 'blocked' | 'dry_run'
@@ -133,8 +133,24 @@ export interface ResultScreen {
   label: string | null
 }
 
+/** After a real fill: a short drafted reply to the last Telegram Business chat. */
+export interface ReplyScreen {
+  mode: 'reply'
+  coin: string | null
+  to: string // "@alice"
+  text: string // <= 60 characters
+  source: 'openrouter' | 'template'
+}
+
 /** Which screen the backend's ActionFlow is on for this client (actions.py). */
-export type UiState = { mode: 'hud' } | MenuScreen | OrderScreen | ResultScreen
+export type UiState = { mode: 'hud' } | MenuScreen | OrderScreen | ResultScreen | ReplyScreen
+
+/** Telegram Business messages of the last 10 minutes (first 30 chars, backend memory only). */
+export interface InboxSummary {
+  count: number
+  from: string
+  preview: string
+}
 
 export interface TradingInfo {
   enabled: boolean
@@ -162,6 +178,7 @@ export interface HudFrame {
   ref: { coin: string; mid: number | null; mark: number | null; mark_source: MarkSource }
   ui: UiState
   trading: TradingInfo
+  inbox?: InboxSummary | null
 }
 
 export interface HelloFrame {
@@ -201,7 +218,14 @@ export interface ErrorFrame {
   raw?: string
 }
 
-export type ServerFrame = HudFrame | HelloFrame | AckFrame | OrderFrame | ErrorFrame
+/** Result of sending a drafted reply. */
+export interface ReplyFrame {
+  type: 'reply'
+  ok: boolean
+  to: string
+}
+
+export type ServerFrame = HudFrame | HelloFrame | AckFrame | OrderFrame | ReplyFrame | ErrorFrame
 
 export interface IntentMessage {
   type: 'intent'
