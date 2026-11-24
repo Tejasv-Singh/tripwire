@@ -115,7 +115,8 @@ and never less than Telegram's `retry_after`. Only a rejected token stops it for
 | HUD says "Backend unreachable" | Check that the backend and `npm run tunnel` are running, then open `https://<host>/healthz`. |
 | `/healthz` returns an HTML page through ngrok | That's ngrok's browser warning. The plugin sends `ngrok-skip-browser-warning` on every fetch. If the WebSocket gets HTML too, use a Cloudflare named tunnel instead. |
 | Backend exits with `TestnetGuardError` | `HL_API_URL` is not exactly `https://api.hyperliquid-testnet.xyz`. That's on purpose. |
-| Log says `Telegram bot not up yet (TimedOut …)` or `(RetryAfter …)` | Telegram is slow or throttling the bot. Leave the backend running, because it retries by itself. Every restart or manual test call makes another request and extends the throttle. If it's still failing after about 15 minutes, `/revoke` the token in BotFather and put the new one in `.env`. |
+| Log says `Telegram bot not up yet (TimedOut …)` or `(RetryAfter …)` | Telegram is slow or throttling the bot. Leave the backend running, because it retries by itself. Every restart or manual test call makes another request and extends the throttle. A brand-new bot took about 18 minutes to get through (9 attempts) on the first day. If it's still failing after about 30 minutes, `/revoke` the token in BotFather and put the new one in `.env`. |
+| Log shows `Exception happened while polling for updates … httpx.ReadError` with a long traceback | Harmless. Telegram dropped the long-poll connection and the library reconnects by itself. `/healthz` → `telegram.status` stays `running`. |
 | `/healthz` says `telegram: error … InvalidToken` | The token in `.env` is wrong (a missing character or an extra space). Fix it and restart. |
 | `evenhub-simulator` not found | `npm run sim` calls the simulator's `bin/index.js` directly. If you run it yourself, `npm rebuild @evenrealities/evenhub-simulator` restores the link. |
 

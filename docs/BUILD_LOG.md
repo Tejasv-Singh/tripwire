@@ -406,4 +406,35 @@ Checks: ruff, ruff format, mypy strict clean; **65 tests pass** (was 59).
 
 **Lesson / how to operate:** when Telegram is throttling, **leave the backend running**. Restarts
 and manual `getMe` tests each make another request and extend the throttle. If it doesn't recover
-in about 15 minutes, `/revoke` the token in BotFather and use the new one.
+in about 30 minutes, `/revoke` the token in BotFather and use the new one.
+
+**Outcome (2026-11-24, IST):** the bot came up **on its own, with the same token and no `/revoke`**.
+After the last backend restart (13:39:46), the retry loop ran like this:
+
+| Attempt | Time | Result | Next wait |
+|---|---|---|---|
+| 1 | 13:40:08 | `TimedOut` | 5 s |
+| 2 | 13:40:15 | `RetryAfter 32` | 33 s |
+| 3 | 13:41:10 | `TimedOut` | 20 s |
+| 4 | 13:41:32 | `RetryAfter 24` | 40 s |
+| 5–8 | 13:42:34 → 13:52:39 | `TimedOut` ×4 | 80 → 160 → 300 → 300 s |
+| 9 | 13:57:46 | **`Telegram bot running as @tripwire_g2_bot`** | — |
+
+That's about 18 minutes from the restart to the bot running. Once the gaps between attempts grew
+past Telegram's flood window, the next `getMe` got through, which is the behaviour `retry_delay()`
+was built for. `/healthz` → `telegram: {"status": "running", "detail": "@tripwire_g2_bot"}`.
+
+Manual tests on a free (non-Premium) account, both passed:
+- `/start` → the intro text (`START_TEXT`).
+- Forwarding a message from another chat → `Echo: <text>`. The backend log shows only
+  `forwarded message chat=… msg=… len=…`, with no message text.
+- Not testable without Premium: `business_connection` / `business_message`.
+
+**Known noise (harmless):** while the bot is running, the log sometimes shows
+`ERROR telegram.ext.Updater: Exception happened while polling for updates` with a long
+`httpx.ReadError` traceback. It happened 3 times in about 50 minutes (14:04, 14:43, 14:46). It means
+the `getUpdates` long-poll connection was dropped, and PTB's own `network_retry_loop` reconnects
+straight away. `/healthz` stayed `running` and both tests passed after these errors. Possible
+follow-up: pass `error_callback=` to `start_polling()` so this prints as one warning line. That
+edits `telegram_bot.py`, which triggers a dev-server reload and a new `getMe`, so do it at a
+quiet moment.
