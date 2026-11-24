@@ -26,6 +26,7 @@ from pydantic import BaseModel, ValidationError
 
 from tripwire.actions import ActionFlow
 from tripwire.db import Store
+from tripwire.drafts import OrderDraft
 from tripwire.exchanges.base import ExchangeAdapter
 from tripwire.hl.positions import Position
 from tripwire.hud import (
@@ -43,6 +44,7 @@ from tripwire.state import MarketState
 log = logging.getLogger(__name__)
 
 CLOSE_BAD_PAIRING_CODE = 4401
+PENDING_DRAFT_S = 300.0  # a draft forwarded while no glasses were connected waits this long
 MIN_INTERVAL_S = 0.5
 HEARTBEAT_S = 5.0
 
@@ -84,6 +86,7 @@ class ClientHub:
 
     def __init__(self) -> None:
         self.sessions: set[ClientSession] = set()
+        self.pending_draft: tuple[OrderDraft, Decision, float] | None = None
 
     @property
     def count(self) -> int:
@@ -95,6 +98,21 @@ class ClientHub:
             session.flow.raise_alert(alert)
             session.wake()
         return len(self.sessions)
+
+    def push_draft(self, draft: OrderDraft, decision: Decision, now: float) -> int:
+        """Show a forwarded order draft on every client; if none is connected, keep it for the
+        next one that connects within PENDING_DRAFT_S."""
+        for session in list(self.sessions):
+            session.flow.raise_draft(draft, decision)
+            session.wake()
+        self.pending_draft = None if self.sessions else (draft, decision, now)
+        return len(self.sessions)
+
+    def take_pending_draft(self, now: float) -> tuple[OrderDraft, Decision] | None:
+        pending, self.pending_draft = self.pending_draft, None
+        if pending is None or now - pending[2] > PENDING_DRAFT_S:
+            return None
+        return pending[0], pending[1]
 
 
 def make_ws_router(
@@ -136,9 +154,12 @@ def make_ws_router(
     def live_position(coin: str) -> Position | None:
         return next((p for p in state.positions if p.coin == coin), None)
 
+    def ref_price(coin: str) -> float | None:
+        p = live_position(coin)
+        return p.mark if p else (state.marks.get(coin) or state.mids.get(coin))
+
     def precheck(order: Order) -> Decision:
-        p = live_position(order.coin)
-        return guard.check(order, position=p, mark=p.mark if p else state.marks.get(order.coin))
+        return guard.check(order, position=live_position(order.coin), mark=ref_price(order.coin))
 
     async def send_order(order: Order) -> OrderResult:
         """The adapter call for each order kind -- only ever invoked by OrderService.submit()."""
@@ -182,9 +203,8 @@ def make_ws_router(
 
     async def run_order(ws: WebSocket, session: ClientSession, req: Order) -> None:
         try:
-            p = live_position(req.coin)
             result = await orders.submit(  # policy guard, then the exchange
-                req, position=p, mark=p.mark if p else None, send=send_order
+                req, position=live_position(req.coin), mark=ref_price(req.coin), send=send_order
             )
         except Exception as exc:  # an executor bug must not leave the screen stuck on "sending"
             log.exception("order task failed")
@@ -274,6 +294,7 @@ def make_ws_router(
                 size_decimals=adapter.size_decimals(position.coin) if position else None,
                 watch=state.watch,
                 precheck=precheck,
+                ref_px=ref_price(session.flow.coin) if session.flow.coin else None,
             )
             count = len(state.positions)
             if out.nav is not None:
@@ -334,6 +355,9 @@ def make_ws_router(
         )
         state.add_listener(session.wake)
         hub.sessions.add(session)
+        waiting = hub.take_pending_draft(asyncio.get_running_loop().time())
+        if waiting is not None:
+            session.flow.raise_draft(*waiting)
         session.wake()  # first hud frame immediately
         log.info("WS client connected: %s (%d total)", client, hub.count)
         send_task = asyncio.create_task(sender(ws, session), name=f"hud-sender-{client}")

@@ -72,6 +72,10 @@ class Settings(BaseSettings):
     alert_hysteresis_pct: float = 1.0  # re-arm only once it is threshold + this % away again
     alert_snooze_s: float = 300.0  # "Snooze 5m" on the glasses
 
+    # --- forwarded-message drafts (drafts.py) ---------------------------------------------------
+    draft_default_notional_usd: float = 100.0  # when the message names no size
+    draft_default_leverage: float = 1.0  # when the message names no "Nx"
+
     # --- policy guard (policy.py) ---------------------------------------------------------------
     kill_switch: bool = False  # true -> no order that adds exposure (closes / tighter SLs still ok)
     max_open_notional_usd: float = 250.0  # per opening order

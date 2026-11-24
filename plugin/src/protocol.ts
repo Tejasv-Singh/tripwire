@@ -30,7 +30,25 @@ export interface Position {
   leverage_type: string
 }
 
-export type MenuKind = 'actions' | 'sl' | 'alert'
+export type MenuKind = 'actions' | 'sl' | 'alert' | 'draft'
+
+/** A forwarded Telegram message parsed into an order (backend drafts.py). */
+export interface DraftInfo {
+  coin: string
+  side: Side
+  notional_usd: number
+  leverage: number
+  entry_px: number | null // null = market
+  sl_px: number | null
+  tp_px: number | null
+  defaults: string[] // "notional" / "leverage" when the message did not say
+}
+
+export interface PolicyVerdict {
+  allowed: boolean
+  rule: string
+  reason: string
+}
 
 /** A liquidation-distance alert from the backend risk engine (risk.py). */
 export interface AlertInfo {
@@ -57,6 +75,9 @@ export interface MenuScreen {
   current_sl?: number | null
   /** kind "alert": what fired (items: Move SL / Close 50% / Close all / Snooze 5m) */
   alert?: AlertInfo
+  /** kind "draft": the forwarded instruction and the policy guard's verdict on it */
+  draft?: DraftInfo
+  policy?: PolicyVerdict
 }
 
 interface OrderScreenBase {
@@ -88,8 +109,20 @@ export interface StopScreen extends OrderScreenBase {
   size: number
 }
 
+/** Open a position from a forwarded draft (SL and TP attached, reduce-only). */
+export interface OpenScreen extends OrderScreenBase {
+  action: 'open'
+  notional: number
+  leverage: number
+  entry: number | null
+  sl: number | null
+  tp: number | null
+  size: number | null // estimate; the adapter rounds to the lot size when sending
+  exact: boolean
+}
+
 /** The confirm and sending screens show the exact order being confirmed / sent. */
-export type OrderScreen = CloseScreen | StopScreen
+export type OrderScreen = CloseScreen | StopScreen | OpenScreen
 
 export interface ResultScreen {
   mode: 'result'

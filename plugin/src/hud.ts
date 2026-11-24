@@ -153,14 +153,31 @@ function alertLines(ui: MenuScreen): string[] {
   ]
 }
 
+export const DRAFT_HEADER = 'FORWARDED - your instruction, not advice'
+
+const fmtEntry = (px: number | null): string => (px == null ? 'market' : `@${fmtLive(px)}`)
+const fmtLevels = (sl: number | null, tp: number | null): string =>
+  [sl == null ? 'no SL' : `SL ${fmtLive(sl)}`, tp == null ? null : `TP ${fmtLive(tp)}`].filter(Boolean).join('  ')
+
+function draftLines(ui: MenuScreen): string[] {
+  const d = ui.draft
+  if (!d) return [DRAFT_HEADER]
+  const lev = `${d.leverage}x${d.defaults.includes('leverage') ? '*' : ''}`
+  const usd = `$${d.notional_usd.toLocaleString('en-US')}${d.defaults.includes('notional') ? '*' : ''}`
+  const verdict = !ui.policy ? 'Policy: not checked' : ui.policy.allowed ? 'Policy OK' : `BLOCKED: ${ui.policy.reason}`
+  return [DRAFT_HEADER, `${d.coin} ${d.side} ${usd} ${lev}  ${fmtEntry(d.entry_px)}`, fmtLevels(d.sl_px, d.tp_px), verdict]
+}
+
 function menuLines(f: HudFrame, ui: MenuScreen): string[] {
   const tag = positionTag(f.position, ui.coin)
   const lines =
-    ui.kind === 'alert'
-      ? alertLines(ui)
-      : ui.kind === 'sl'
-        ? [`MOVE SL  ${tag}`, slInfoLine(f, ui)]
-        : [`ACTIONS  ${tag}  reduce-only`]
+    ui.kind === 'draft'
+      ? draftLines(ui)
+      : ui.kind === 'alert'
+        ? alertLines(ui)
+        : ui.kind === 'sl'
+          ? [`MOVE SL  ${tag}`, slInfoLine(f, ui)]
+          : [`ACTIONS  ${tag}  reduce-only`]
   ui.items.forEach((item, i) => lines.push(`${i === ui.cursor ? '>' : ' '} ${item}`))
   const note = ui.note ?? (ui.trading ? null : 'Trading off: read-only (no agent key)')
   if (note) lines.push(note)
@@ -172,6 +189,11 @@ function orderLine(ui: OrderScreen): string {
   if (ui.action === 'stop') {
     const old = ui.old_sl == null ? 'none' : fmtCompact(ui.old_sl)
     return `SL ${old} -> ${fmtCompact(ui.new_sl)}  reduce-only`
+  }
+  if (ui.action === 'open') {
+    const verb = ui.side === 'LONG' ? 'BUY' : 'SELL'
+    const qty = ui.size == null ? '' : ` ~${fmtQty(Number(ui.size.toPrecision(4)))}`
+    return `${verb}${qty} ${ui.coin}  $${ui.notional.toLocaleString('en-US')} ${ui.leverage}x  ${fmtEntry(ui.entry)}`
   }
   const verb = ui.side === 'LONG' ? 'SELL' : 'BUY' // closing a long sells, closing a short buys
   const qty = ui.all ? `ALL ${fmtQty(ui.size)}` : `${ui.exact ? '' : '~'}${fmtQty(ui.size)}`
@@ -186,7 +208,9 @@ function confirmLines(ui: OrderScreen, dryRun: boolean): string[] {
           ui.old_sl == null ? 'adds a stop for the whole position' : 'new SL placed first, then old cancelled',
           `mark ${fmtLive(ui.mark)}  entry ${fmtCompact(ui.entry)}`,
         ]
-      : [`at ~${fmtLive(ui.est_px)} mark, max ${ui.slippage_pct}% slippage`]
+      : ui.action === 'open'
+        ? [`${fmtLevels(ui.sl, ui.tp)}  attached`, 'your forwarded instruction, not advice']
+        : [`at ~${fmtLive(ui.est_px)} mark, max ${ui.slippage_pct}% slippage`]
   return [
     `CONFIRM  ${ui.label}  ${ui.coin}-PERP ${ui.side}`,
     orderLine(ui),

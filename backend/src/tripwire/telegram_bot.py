@@ -7,7 +7,8 @@ Day 1 behaviour:
   send_owner(text)          -> DM the owner (risk alerts when no glasses are connected)
   business_connection       -> log metadata + upsert into SQLite (who connected, enabled, can reply)
   business_message          -> log metadata ONLY (ids, length) — text is never logged or stored
-  forwarded private message -> echo it back (placeholder for "forward a message to the copilot")
+  forwarded / typed text    -> owner only: parse into an order draft (drafts.py), run the policy
+                               guard, show it on the glasses for the two-tap confirm
 
 Runs inside the FastAPI process via long polling (no public webhook needed). Startup never
 blocks or crashes the backend:
@@ -40,7 +41,8 @@ from telegram.ext import (
 )
 
 from tripwire.db import Store
-from tripwire.policy import KillSwitch
+from tripwire.drafts import DraftError, OrderDraft, parse_draft
+from tripwire.policy import Decision, KillSwitch
 from tripwire.risk import AlertService
 
 log = logging.getLogger(__name__)
@@ -79,6 +81,12 @@ class BotServices:
     owner_id: int | None = None
     kill_switch: KillSwitch | None = None
     alerts: AlertService | None = None
+    # forwarded-message drafts (item 6)
+    known_coins: Callable[[], set[str] | None] | None = None
+    check_draft: Callable[[OrderDraft], Decision] | None = None
+    push_draft: Callable[[OrderDraft, Decision], int] | None = None
+    default_notional: float = 100.0
+    default_leverage: float = 1.0
 
 
 def is_owner(update: Update, services: BotServices | None) -> bool:
@@ -144,6 +152,15 @@ def make_kill_handlers(services: BotServices | None) -> list[CommandHandler[Any,
         CommandHandler("kill", on_kill, filters=only_messages),
         CommandHandler("unkill", on_unkill, filters=only_messages),
     ]
+
+
+def _draft_filter() -> Any:
+    return (
+        filters.UpdateType.MESSAGE
+        & filters.ChatType.PRIVATE
+        & (filters.TEXT | filters.CAPTION)
+        & ~filters.COMMAND
+    )
 
 
 def make_threshold_handler(services: BotServices | None) -> CommandHandler[Any, None]:
@@ -222,15 +239,58 @@ async def on_business_message(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -
     )
 
 
-async def on_forwarded(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    msg = update.message
-    if msg is None:
-        return
-    text = msg.text or msg.caption
-    log.info(
-        "forwarded message chat=%s msg=%s len=%d", msg.chat_id, msg.message_id, len(text or "")
-    )
-    await msg.reply_text(f"Echo: {text}" if text else "Echo: (forwarded message without text)")
+DRAFT_HEADER = "FORWARDED - your instruction, not advice"
+
+
+def make_draft_handler(services: BotServices | None) -> MessageHandler[Any, None]:
+    """Forwarded (or typed) text from the owner -> order draft -> policy -> glasses."""
+
+    async def on_draft_text(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.message
+        if msg is None:
+            return
+        text = msg.text or msg.caption or ""
+        log.info(  # metadata only: never the text
+            "draft candidate chat=%s msg=%s forwarded=%s len=%d",
+            msg.chat_id,
+            msg.message_id,
+            msg.forward_origin is not None,
+            len(text),
+        )
+        if not is_owner(update, services) or services is None:
+            await msg.reply_text("Order drafts from forwarded messages are only for the bot owner.")
+            return
+        try:
+            draft = parse_draft(
+                text,
+                default_notional=services.default_notional,
+                default_leverage=services.default_leverage,
+                known_coins=services.known_coins() if services.known_coins else None,
+            )
+        except DraftError as exc:
+            await msg.reply_text(f"Not an order I can draft: {exc}.")
+            return
+        decision = services.check_draft(draft) if services.check_draft else None
+        shown = services.push_draft(draft, decision) if services.push_draft and decision else 0
+        lines = [DRAFT_HEADER, draft.summary()]
+        if draft.defaults:
+            lines.append("Defaults used: " + ", ".join(draft.defaults))
+        if decision is None:
+            lines.append("Policy: not checked (backend not ready)")
+        elif decision.allowed:
+            lines.append("Policy: OK - " + decision.reason)
+        else:
+            lines.append("BLOCKED by policy: " + decision.reason)
+        lines.append(
+            "On your glasses now: two taps to confirm."
+            if shown and decision is not None and decision.allowed
+            else "Shown on your glasses."
+            if shown
+            else "No glasses connected: it will show when they connect (5 min)."
+        )
+        await msg.reply_text("\n".join(lines))
+
+    return MessageHandler(_draft_filter(), on_draft_text)
 
 
 def on_polling_error(exc: TelegramError) -> None:
@@ -259,12 +319,7 @@ def build_application(
     app.add_handler(make_threshold_handler(services))
     app.add_handler(make_business_connection_handler(store))
     app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGES, on_business_message))
-    app.add_handler(
-        MessageHandler(
-            filters.UpdateType.MESSAGE & filters.ChatType.PRIVATE & filters.FORWARDED,
-            on_forwarded,
-        )
-    )
+    app.add_handler(make_draft_handler(services))
     return app
 
 

@@ -971,3 +971,84 @@ turns every other non-ASCII character into `?`. Whether it renders is checked in
   - **With no client, the same move produces a DM** (fake notifier).
 
 Plugin: 33 tests (RISK screen; `fit` keeps only `▲`).
+
+### 19. Telegram depth, part 1: forward-to-bot order drafts (item 6)
+
+**Change of plan (user, 2026-11-24): no Anthropic key.** Drafts come from a **deterministic
+parser** (`drafts.py`, regex tokenizer, no LLM). Reply drafts (§20) use OpenRouter with template
+fallback.
+
+**Parser (`parse_draft` → `OrderDraft`):** the strict schema is `coin, side, notional_usd,
+leverage, entry_px (None = market), sl_px, tp_px`, plus `defaults`.
+
+What it reads:
+- `BTC long 96.5k sl 95k tp 99k` and `ETH short @3400 SL 3480 TP 3200`.
+- Suffixes `k`/`K`/`m`, thousands commas (`96,500`), `.055`.
+- Side words: `buy`/`sell`/`long`/`short`.
+- Field labels: `stop`/`stop-loss`/`target`/`take-profit`/`entry`/`at`/`@`.
+- `market`/`mkt`.
+- Leverage as `5x` / `5 x` / `lev 5`. Notional as `$200`, `200$`, `200 usd(c)`, `size 200`.
+- `BTC-PERP` / `BTCUSDT` / `BTC/USD` are all read as BTC.
+- The first unlabelled number after the coin/side is the entry.
+- Missing notional or leverage → `DRAFT_DEFAULT_NOTIONAL_USD` ($100) and
+  `DRAFT_DEFAULT_LEVERAGE` (1x), listed in `defaults`. The glasses mark them with `*`.
+
+**Ambiguous or malformed → `DraftError` with a reason** (the Telegram reply is
+`Not an order I can draft: <reason>.`):
+- no coin, or more than one coin; no side, or both sides;
+- an unlabelled extra number (`which price is 95k? label it (sl / tp / @entry)`);
+- the same field twice with different values; `market` plus a bare price;
+- a label without a number; fractional leverage; zero or negative values;
+- an unknown coin (once the coin list is known); more than 300 characters.
+
+Choices:
+- With the coin list loaded (allMids perps, at least 20), other words are ignored as chatter
+  (`lfg BTC long ... pls`). Without it, they count as coins, so the message is rejected rather
+  than guessed.
+- A missing SL is **not** a parse error: the policy guard refuses it with its own reason. SL/TP
+  on the wrong side is left to the guard too, so its reasons stay in one place.
+
+**Bug found by the tests and fixed:** `tp 99k $1000` was read as notional $99,000 plus tp 1000.
+The suffix form `200$` allowed a space before `$`. A trailing `$` must now touch its number. A
+regression test covers it.
+
+**Telegram (`make_draft_handler`).** This **replaces the Day-1 forward echo.**
+- It handles private text or captions that aren't commands, forwarded or typed.
+- Owner only (`TELEGRAM_OWNER_ID`); anyone else is told it's owner-only.
+- The text is parsed, `check_draft` runs `PolicyGuard.check(draft.to_order(), position, mark)`,
+  and `push_draft` sends it to the glasses.
+- Reply:
+  ```
+  FORWARDED - your instruction, not advice
+  BTC LONG $100 1x @ 96,500  SL 95,000  TP 99,000
+  Defaults used: notional, leverage
+  Policy: OK - within limits, has a stop-loss        (or: BLOCKED by policy: Notional $1,000 > max $250)
+  On your glasses now: two taps to confirm.          (or: No glasses connected: it will show when they connect (5 min).)
+  ```
+- Only metadata is logged (chat id, message id, forwarded flag, length), never the text.
+
+**Glasses (`ActionFlow.raise_draft`, menu kind `draft`):**
+- Screen: `FORWARDED - your instruction, not advice` / `BTC LONG $100* 1x*  @96,500` /
+  `SL 95,000  TP 99,000` / `Policy OK` (or `BLOCKED: <reason>`).
+- Items: **Place order / Discard**, or **only Discard** when blocked.
+- Place order builds the `OpenOrder` and runs a fresh policy pre-check (e.g. a `/kill` sent since
+  the draft blocks it here). Then comes the same two-tap confirm:
+  `BUY ~0.001036 BTC  $100 1x  @96,500` / `SL 95,000  TP 99,000  attached` / `your forwarded
+  instruction, not advice`.
+- After that: `OrderService.submit` → `adapter.place_order` (§15: leverage, then entry + SL + TP
+  as `normalTpsl`).
+- Like alerts, a draft waits during a confirm or an order in flight.
+- If no glasses are connected, `ClientHub` keeps the latest draft for `PENDING_DRAFT_S` = 300 s
+  and shows it on the next connect.
+- The reference price for market drafts and the guard falls back position mark → markPx → mid
+  (`ws.ref_price`).
+
+**Checks:**
+- **248 backend tests pass**:
+  - `test_drafts.py`, 40: 13 formats, defaults/leverage/notional forms, chatter, summary, number
+    parsing, 18 refusal cases with their exact reasons, plus the regression.
+  - `test_forward_drafts.py`, 11: the flow; the handler replies for OK / blocked / ambiguous /
+    stranger; **end to end**: forward → glasses draft → Place → two taps → `place_order` on the
+    fake; a 10x draft shows `BLOCKED: Leverage 10x > max 5x` with only Discard; a draft forwarded
+    with no glasses appears on the next connect.
+- Plugin: 35 tests.

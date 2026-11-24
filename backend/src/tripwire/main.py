@@ -18,17 +18,19 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from tripwire.config import Settings, assert_testnet
 from tripwire.db import Store
+from tripwire.drafts import OrderDraft
 from tripwire.exchanges.base import ExchangeAdapter
 from tripwire.exchanges.hyperliquid import HyperliquidAdapter
 from tripwire.hl.feed import HyperliquidFeed
 from tripwire.orders import OrderService
-from tripwire.policy import KillSwitch, PolicyGuard, PolicyLimits
+from tripwire.policy import Decision, KillSwitch, PolicyGuard, PolicyLimits
 from tripwire.risk import AlertService, RiskEngine
 from tripwire.state import MarketState
 from tripwire.telegram_bot import BotServices, TelegramBot, build_application
 from tripwire.ws import ClientHub, make_ws_router
 
 log = logging.getLogger("tripwire")
+KNOWN_COINS_MIN = 20  # allMids lists ~200 perps on testnet; fewer means "not loaded yet"
 
 
 _SECRET_PATTERNS = [
@@ -132,6 +134,26 @@ def create_app(
     )
     bot_services.alerts = alerts
 
+    def known_coins() -> set[str] | None:
+        """Perp names from allMids (spot pairs look like "@107" / "PURR/USDC"). None until the
+        full list has arrived, so the parser doesn't reject coins it simply hasn't seen yet."""
+        perps = {c.upper() for c in state.mids if c.isalnum()}
+        return perps if len(perps) >= KNOWN_COINS_MIN else None
+
+    def check_draft(draft: OrderDraft) -> Decision:
+        p = next((x for x in state.positions if x.coin == draft.coin), None)
+        mark = p.mark if p else (state.marks.get(draft.coin) or state.mids.get(draft.coin))
+        return guard.check(draft.to_order(), position=p, mark=mark)
+
+    def push_draft(draft: OrderDraft, decision: Decision) -> int:
+        return hub.push_draft(draft, decision, asyncio.get_running_loop().time())
+
+    bot_services.known_coins = known_coins
+    bot_services.check_draft = check_draft
+    bot_services.push_draft = push_draft
+    bot_services.default_notional = settings.draft_default_notional_usd
+    bot_services.default_leverage = settings.draft_default_leverage
+
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(store.init)
@@ -226,5 +248,6 @@ def create_app(
     app.state.hub = hub
     app.state.guard = guard
     app.state.alerts = alerts
+    app.state.bot_services = bot_services
     app.state.kill_switch = kill_switch
     return app

@@ -207,6 +207,45 @@ describe('action screens', () => {
     ])
   })
 
+  it('renders a forwarded draft: header, order, levels, policy verdict', () => {
+    const draft: UiState = {
+      mode: 'menu', kind: 'draft', coin: 'BTC', items: ['Place order', 'Discard'], cursor: 0,
+      trading: true, note: null,
+      draft: { coin: 'BTC', side: 'LONG', notional_usd: 100, leverage: 1, entry_px: 96500, sl_px: 95000,
+               tp_px: 99000, defaults: ['notional', 'leverage'] },
+      policy: { allowed: true, rule: 'open_within_limits', reason: 'within limits, has a stop-loss' },
+    }
+    expect(at(draft).split('\n').slice(1, 7)).toEqual([
+      'FORWARDED - your instruction, not advice',
+      'BTC LONG $100* 1x*  @96,500',
+      'SL 95,000  TP 99,000',
+      'Policy OK',
+      '> Place order',
+      '  Discard',
+    ])
+    const blocked: UiState = {
+      ...draft, items: ['Discard'],
+      policy: { allowed: false, rule: 'max_notional', reason: 'Notional $1,000 > max $250' },
+    }
+    expect(at(blocked)).toContain('BLOCKED: Notional $1,000 > max $250')
+    assertFits(at(blocked))
+  })
+
+  it('renders the open-order confirm screen', () => {
+    const open: UiState = {
+      mode: 'confirm', action: 'open', coin: 'BTC', side: 'LONG', label: 'Place order', notional: 100,
+      leverage: 1, entry: 96500, sl: 95000, tp: 99000, size: 100 / 96500, exact: false, expires_in_ms: 5000,
+    }
+    expect(at(open).split('\n').slice(1, 6)).toEqual([
+      'CONFIRM  Place order  BTC-PERP LONG',
+      'BUY ~0.001036 BTC  $100 1x  @96,500',
+      'SL 95,000  TP 99,000  attached',
+      'your forwarded instruction, not advice',
+      'Tap again within 5s to SEND.',
+    ])
+    assertFits(at({ ...open, entry: null, size: null }))
+  })
+
   it('renders the RISK alert screen with its four actions', () => {
     const alert: UiState = {
       mode: 'menu', kind: 'alert', coin: 'ETH', items: ['Move SL', 'Close 50%', 'Close all', 'Snooze 5m'],

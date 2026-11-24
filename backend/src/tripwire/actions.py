@@ -24,6 +24,9 @@ Menus (`kind`):
   alert    Move SL | Close 50% | Close all | Snooze 5m                  (risk.py raised it; it
                                                                          waits if a confirm or an
                                                                          order is in progress)
+  draft    Place order | Discard   (or only Discard if the policy guard blocks it)
+           A forwarded Telegram message parsed by drafts.py: "FORWARDED - your instruction, not
+           advice". Place order arms an OpenOrder: policy pre-check, then the two-tap confirm.
   sl       SL to breakeven | SL tighter 1% | Back                      (the current SL is fetched
                                                                          from the exchange when the
                                                                          submenu opens)
@@ -39,9 +42,10 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from tripwire.drafts import OrderDraft
 from tripwire.exchanges.base import StopInfo
 from tripwire.hl.positions import Position
-from tripwire.orders import CloseOrder, Order, OrderResult, ResultStatus, StopOrder
+from tripwire.orders import CloseOrder, OpenOrder, Order, OrderResult, ResultStatus, StopOrder
 from tripwire.policy import Decision
 from tripwire.risk import Alert
 from tripwire.trading import SLIPPAGE, round_px, round_size_down
@@ -51,7 +55,7 @@ from tripwire.trading import SLIPPAGE, round_px, round_size_down
 Precheck = Callable[[Order], Decision]
 
 Mode = Literal["hud", "menu", "confirm", "sending", "result"]
-MenuKind = Literal["actions", "sl", "alert"]
+MenuKind = Literal["actions", "sl", "alert", "draft"]
 Intent = Literal["next", "prev", "tap", "back"]
 
 CONFIRM_WINDOW_S = 5.0  # second tap must land within this many seconds of the first
@@ -88,6 +92,8 @@ MENUS: dict[str, tuple[MenuItem, ...]] = {
     ),
 }
 MENU = MENUS["actions"]  # Day-2 name
+DRAFT_OK = (MenuItem("place", "Place order"), MenuItem("discard", "Discard"))
+DRAFT_BLOCKED = (MenuItem("discard", "Discard"),)
 CLOSE_FRACTIONS = {"close25": 0.25, "close50": 0.5, "close100": 1.0}
 
 
@@ -137,6 +143,9 @@ class ActionFlow:
         self.stop: StopState | None = None
         self.alert: Alert | None = None  # the alert on screen (kind "alert" and its submenus)
         self.pending_alert: Alert | None = None  # raised during a confirm/order: shown after
+        self.draft: OrderDraft | None = None  # the forwarded draft on screen (kind "draft")
+        self.draft_decision: Decision | None = None  # the policy guard's verdict on it
+        self.pending_draft: tuple[OrderDraft, Decision] | None = None
         self.token = 0  # bumped on every transition; stale timers compare and do nothing
 
     # --- transitions -------------------------------------------------------------------------
@@ -145,11 +154,16 @@ class ActionFlow:
             alert, self.pending_alert = self.pending_alert, None
             self._show_alert(alert)  # an alert that waited for the order wins over the HUD
             return self.token
+        if mode == "hud" and self.pending_draft is not None:
+            pending, self.pending_draft = self.pending_draft, None
+            self._show_draft(*pending)
+            return self.token
         self.mode, self.note = mode, note
         self.token += 1
         if mode == "hud":
             self.coin, self.armed, self.result, self.cursor = None, None, None, 0
             self.kind, self.parent, self.stop, self.alert = "actions", "actions", None, None
+            self.draft, self.draft_decision = None, None
         if mode == "menu":
             self.armed, self.result = None, None
         return self.token
@@ -182,8 +196,26 @@ class ActionFlow:
         self.armed, self.result = None, None
         self.token += 1
 
+    def raise_draft(self, draft: OrderDraft, decision: Decision) -> bool:
+        """Show a forwarded order draft. Waits (False) during a confirm / order in flight."""
+        if self.mode in ("confirm", "sending"):
+            self.pending_draft = (draft, decision)
+            return False
+        self._show_draft(draft, decision)
+        return True
+
+    def _show_draft(self, draft: OrderDraft, decision: Decision) -> None:
+        self.coin, self.draft, self.draft_decision = draft.coin, draft, decision
+        self.kind, self.parent, self.cursor = "draft", "draft", 0
+        self.mode, self.note = "menu", None
+        self.armed, self.result, self.alert = None, None, None
+        self.token += 1
+
     @property
     def items(self) -> tuple[MenuItem, ...]:
+        if self.kind == "draft":
+            ok = self.draft_decision is not None and self.draft_decision.allowed
+            return DRAFT_OK if ok else DRAFT_BLOCKED
         return MENUS[self.kind]
 
     def set_stop(self, coin: str, info: StopInfo | None) -> bool:
@@ -203,8 +235,10 @@ class ActionFlow:
         size_decimals: int | None = None,
         watch: bool = False,
         precheck: Precheck | None = None,
+        ref_px: float | None = None,
     ) -> Outcome:
         """`position` = the position this client is looking at (the locked coin once in a menu).
+        `ref_px` = current price of the locked coin (market drafts estimate their size with it).
         `watch` = the positions are someone else's (WATCH_ADDRESS): the menu stays closed."""
         if self.mode == "hud":
             if intent in ("next", "prev"):
@@ -227,7 +261,7 @@ class ActionFlow:
                 self._go("hud")
                 return Outcome()
             item = self.items[self.cursor]
-            ctx = _ArmCtx(position, now, trading, size_decimals, precheck, watch)
+            ctx = _ArmCtx(position, now, trading, size_decimals, precheck, watch, ref_px)
             return self._select(item, ctx)
 
         if self.mode == "confirm":
@@ -268,6 +302,11 @@ class ActionFlow:
             return Outcome()
         if item.key == "sl_menu":
             return self._open_menu("sl", parent=self.kind)
+        if item.key == "discard":
+            self._go("hud")
+            return Outcome(note="draft discarded")
+        if item.key == "place":
+            return self._arm_open(ctx)
         if item.key == "snooze":
             alert = self.alert
             self._go("hud")
@@ -295,6 +334,28 @@ class ActionFlow:
         self.armed = Armed(order, label, view, ctx.now, self.kind)
         token = self._go("confirm")
         return Outcome(timer_s=CONFIRM_WINDOW_S, token=token)
+
+    def _arm_open(self, ctx: _ArmCtx) -> Outcome:
+        draft = self.draft
+        if draft is None:
+            return self._fail("No draft to place")
+        if ctx.watch:
+            return self._fail("Watch only - not your account, nothing sent")
+        if not ctx.trading:
+            return self._fail("Trading off: set HL_AGENT_KEY + HL_ACCOUNT_ADDRESS (or DRY_RUN)")
+        order: OpenOrder = draft.to_order()
+        ref = draft.entry_px or ctx.ref_px
+        view = {
+            "side": draft.side,
+            "notional": draft.notional_usd,
+            "leverage": draft.leverage,
+            "entry": draft.entry_px,
+            "sl": draft.sl_px,
+            "tp": draft.tp_px,
+            "size": order.notional_usd / ref if ref else None,
+            "exact": False,  # rounded to the lot size by the exchange adapter when sent
+        }
+        return self._arm(order, "Place order", view, ctx)
 
     def _arm_close(self, item: MenuItem, fraction: float, ctx: _ArmCtx) -> Outcome:
         p = ctx.position
@@ -413,6 +474,13 @@ class ActionFlow:
                 base.update(sl_loaded=loaded, current_sl=info.trigger_px if info else None)
             if self.kind == "alert" and self.alert is not None:
                 base.update(alert=self.alert.to_dict())
+            if self.kind == "draft" and self.draft is not None:
+                d = self.draft_decision
+                base.update(
+                    draft=self.draft.to_dict(),
+                    policy={"allowed": bool(d and d.allowed), "rule": d.rule if d else "",
+                            "reason": d.reason if d else ""},
+                )  # fmt: skip
         elif self.mode in ("confirm", "sending") and self.armed is not None:
             a = self.armed
             base.update(
@@ -440,3 +508,4 @@ class _ArmCtx:
     size_decimals: int | None
     precheck: Precheck | None
     watch: bool = False
+    ref_px: float | None = None
