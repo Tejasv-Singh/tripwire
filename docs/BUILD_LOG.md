@@ -353,3 +353,57 @@ expected and local only, but don't paste those logs publicly.
 - If you clone this on another machine, set the same local email there:
   `git config user.email "<id>+Tejasv-Singh@users.noreply.github.com"` (the id is shown under
   GitHub → Settings → Emails).
+
+---
+
+## 2026-11-24 · Day 2 (morning)
+
+### 11. Telegram bot setup, and making the bot's startup resilient
+
+**Setup, as the user did it:** BotFather `/newbot` → `@tripwire_g2_bot`. In BotFather's current
+mini-app, **"Business Mode" is called "Secretary Mode"** (Bot Settings → Mode Settings). Its
+description, "read or send messages on behalf of the user who enabled it in Settings", is the
+Business-bot feature. Turned on. Connecting the bot to a user's chats (Settings → Telegram
+Business → Chatbots) **requires Telegram Premium**; the user confirmed this in the app. Part of the
+flow is therefore not testable without Premium: `/start` and the forward echo work on a free
+account, but `business_connection` / `business_message` can't be.
+
+**Problem found:** with the token set, startup logged
+`Telegram bot skipped: TimedOut: Timed out` and the bot stayed off until a manual restart.
+Diagnosis:
+
+| Test | Result |
+|---|---|
+| `curl https://api.telegram.org/` (IPv4 and IPv6) | 302 in ~1 s, so the network can reach Telegram |
+| Bot API `getMe` with a **fake** token | 401 in 0.7 s, so the Bot API path is fine |
+| `getMe` with the **real** token, PTB defaults (5 s) | `TimedOut` ×4, then `RetryAfter` |
+| `getMe` with the real token, 30–45 s timeout | reply after **~57 s**: `429 Too Many Requests: retry after 32` |
+
+So the problem was specific to this bot. Telegram was holding replies for a brand-new bot (its
+first logins can be slow), and every retry, including requests that timed out but still reached
+Telegram, re-armed the 32 s flood window. Uvicorn's auto-reload made it worse: each save of
+`telegram_bot.py` restarted the backend, which made another call.
+
+**Fix** (`backend/src/tripwire/telegram_bot.py`):
+- `TelegramBot.start()` is now **non-blocking**. It spawns a `telegram-bot` task, so backend
+  startup is never held up. The new status `starting` (with an attempt/retry detail) shows on
+  `/healthz`.
+- Retry policy (`retry_delay()`): timeouts, network errors, 409 and 429 are retried; the wait is
+  5 s doubling, capped at `RETRY_MAX_S` = 300 s. On a 429 it waits `max(retry_after + 1, backoff)`,
+  so gaps keep growing even if Telegram keeps re-arming the window. **`InvalidToken` is permanent**:
+  status `error` with a "fix TELEGRAM_BOT_TOKEN" hint, and no retries.
+- Per-request timeouts raised from PTB's 5 s to `CONNECT_TIMEOUT_S` = 10 s and `READ_TIMEOUT_S` =
+  20 s (`build_application`).
+- Failed attempts shut their `Application` down; `stop()` cancels a pending backoff cleanly.
+- `TelegramBot` takes `app_factory` and `sleep` parameters so the loop is tested offline
+  (`tests/test_telegram_bot.py`, fake Application, no network). The tests cover the backoff and
+  429 math, transient errors followed by running, a permanent bad token, a non-blocking start with
+  a cancellable stop, and an empty token.
+- PTB 22.2+ warns that `RetryAfter.retry_after` will become a `timedelta`. The code handles both
+  types and suppresses the warning where it reads the value.
+
+Checks: ruff, ruff format, mypy strict clean; **65 tests pass** (was 59).
+
+**Lesson / how to operate:** when Telegram is throttling, **leave the backend running**. Restarts
+and manual `getMe` tests each make another request and extend the throttle. If it doesn't recover
+in about 15 minutes, `/revoke` the token in BotFather and use the new one.

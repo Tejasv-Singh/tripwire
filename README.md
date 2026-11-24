@@ -85,6 +85,27 @@ if you want to use real glasses.
 `npm run check` also runs ruff, strict mypy and tsc. `curl http://127.0.0.1:8000/healthz` shows
 the feed and bot status.
 
+### Telegram bot (optional)
+
+1. In Telegram, open **@BotFather** (blue check), send `/newbot`, give it a name (`Tripwire`)
+   and a username ending in `bot`. Copy the token. Treat it like a password; `/revoke` replaces it.
+2. `/mybots` → your bot → **Bot Settings** → **Mode Settings**: turn **Secretary Mode** on. This
+   is BotFather's current name for what used to be "Business Mode". Leave the other modes off.
+   Turning **Allow Groups** off is recommended, since Tripwire only works in private chats.
+3. Put the token in `.env` as `TELEGRAM_BOT_TOKEN=…`, then restart the backend. Auto-reload only
+   watches `backend/src`, not `.env`.
+4. The backend log shows `telegram=starting`, then `Telegram bot running as @your_bot`.
+   `/healthz` → `telegram.status` is `running`. Send the bot `/start` (you should get an intro) and
+   forward it any message (you should get `Echo: …`).
+5. Connecting the bot to your other chats needs **Telegram Premium**:
+   Settings → Telegram Business → Chatbots → `@your_bot` → pick the chats. The backend then logs
+   `business_connection …`. Without Premium, `/start`, the echo and future alerts in the bot's own
+   chat still work.
+
+The bot connects in the background and never blocks or crashes the backend. On timeouts or
+Telegram flood control (HTTP 429) it retries with growing gaps: 5 s, doubling, capped at 300 s,
+and never less than Telegram's `retry_after`. Only a rejected token stops it for good.
+
 ### Troubleshooting
 
 | Symptom | Fix |
@@ -94,6 +115,8 @@ the feed and bot status.
 | HUD says "Backend unreachable" | Check that the backend and `npm run tunnel` are running, then open `https://<host>/healthz`. |
 | `/healthz` returns an HTML page through ngrok | That's ngrok's browser warning. The plugin sends `ngrok-skip-browser-warning` on every fetch. If the WebSocket gets HTML too, use a Cloudflare named tunnel instead. |
 | Backend exits with `TestnetGuardError` | `HL_API_URL` is not exactly `https://api.hyperliquid-testnet.xyz`. That's on purpose. |
+| Log says `Telegram bot not up yet (TimedOut …)` or `(RetryAfter …)` | Telegram is slow or throttling the bot. Leave the backend running, because it retries by itself. Every restart or manual test call makes another request and extends the throttle. If it's still failing after about 15 minutes, `/revoke` the token in BotFather and put the new one in `.env`. |
+| `/healthz` says `telegram: error … InvalidToken` | The token in `.env` is wrong (a missing character or an extra space). Fix it and restart. |
 | `evenhub-simulator` not found | `npm run sim` calls the simulator's `bin/index.js` directly. If you run it yourself, `npm rebuild @evenrealities/evenhub-simulator` restores the link. |
 
 ## Safety rules

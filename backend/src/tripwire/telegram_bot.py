@@ -6,19 +6,26 @@ Day 1 behaviour:
   business_message          -> log metadata ONLY (ids, length) — text is never logged or stored
   forwarded private message -> echo it back (placeholder for "forward a message to the copilot")
 
-Runs inside the FastAPI process via long polling (no public webhook needed). With no
-TELEGRAM_BOT_TOKEN, or if Telegram rejects the token / is unreachable, the bot is skipped and the
-rest of the backend keeps running; `status` reports why.
+Runs inside the FastAPI process via long polling (no public webhook needed). Startup never
+blocks or crashes the backend:
+  * no TELEGRAM_BOT_TOKEN         -> status "disabled", nothing runs
+  * Telegram rejects the token    -> status "error", no retries (fix .env, restart)
+  * timeout / network / 429 flood -> status "starting", retried in the background: waits the
+                                     server's retry_after on 429, else backs off 5 s -> 300 s
+`status` / `detail` are exposed on /healthz.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import warnings
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
 from typing import Any, Literal
 
 from telegram import Update
-from telegram.error import InvalidToken, TelegramError
+from telegram.error import InvalidToken, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     BusinessConnectionHandler,
@@ -32,7 +39,13 @@ from tripwire.db import Store
 
 log = logging.getLogger(__name__)
 
-BotStatus = Literal["disabled", "running", "error"]
+BotStatus = Literal["disabled", "starting", "running", "error"]
+
+RETRY_BASE_S = 5.0  # first backoff after a timeout / network error
+RETRY_MAX_S = 300.0  # backoff cap
+# Per-request timeouts for normal Bot API calls (PTB defaults are 5 s; too tight on slow links).
+CONNECT_TIMEOUT_S = 10.0
+READ_TIMEOUT_S = 20.0
 
 ALLOWED_UPDATES = [
     Update.MESSAGE,
@@ -115,7 +128,14 @@ async def on_forwarded(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 def build_application(token: str, store: Store | None) -> Application:  # type: ignore[type-arg]
-    app = Application.builder().token(token).build()
+    app = (
+        Application.builder()
+        .token(token)
+        .connect_timeout(CONNECT_TIMEOUT_S)
+        .read_timeout(READ_TIMEOUT_S)
+        .write_timeout(READ_TIMEOUT_S)
+        .build()
+    )
     app.add_handler(CommandHandler("start", on_start, filters=filters.UpdateType.MESSAGE))
     app.add_handler(make_business_connection_handler(store))
     app.add_handler(MessageHandler(filters.UpdateType.BUSINESS_MESSAGES, on_business_message))
@@ -128,42 +148,101 @@ def build_application(token: str, store: Store | None) -> Application:  # type: 
     return app
 
 
+def retry_delay(exc: BaseException, attempt: int) -> float:
+    """Seconds to wait before the next startup attempt (attempt is 1-based).
+
+    Exponential backoff (5 s doubling, capped at 300 s). On a 429 the wait is at least what
+    Telegram asked for (+1 s) — but never less than the backoff, because a request that times out
+    still reaches Telegram and re-arms the flood window; fixed 33 s retries could stay stuck."""
+    backoff = float(min(RETRY_BASE_S * 2 ** (attempt - 1), RETRY_MAX_S))
+    if isinstance(exc, RetryAfter):
+        with warnings.catch_warnings():  # PTB 22.2+ warns that int will become timedelta
+            warnings.simplefilter("ignore")
+            wait = exc.retry_after
+        seconds = wait.total_seconds() if isinstance(wait, timedelta) else float(wait)
+        return max(seconds + 1.0, backoff)
+    return backoff
+
+
+AppFactory = Callable[[str, Store | None], Any]
+Sleep = Callable[[float], Awaitable[None]]
+
+
 class TelegramBot:
-    def __init__(self, token: str, store: Store | None) -> None:
+    def __init__(
+        self,
+        token: str,
+        store: Store | None,
+        *,
+        app_factory: AppFactory = build_application,
+        sleep: Sleep = asyncio.sleep,
+    ) -> None:
         self.token = token.strip()
         self.store = store
         self.status: BotStatus = "disabled"
         self.detail = "not started" if self.token else "TELEGRAM_BOT_TOKEN is empty"
-        self._app: Application | None = None  # type: ignore[type-arg]
+        self.attempts = 0
+        self._app: Any = None
+        self._task: asyncio.Task[None] | None = None
+        self._factory = app_factory
+        self._sleep = sleep
 
     async def start(self) -> None:
+        """Non-blocking: connects in a background task so backend startup is never held up."""
         if not self.token:
             log.info("Telegram bot skipped: TELEGRAM_BOT_TOKEN is empty")
             return
-        app = build_application(self.token, self.store)
-        try:
-            await app.initialize()  # calls getMe -> validates the token
-            await app.start()
-            assert app.updater is not None
-            await app.updater.start_polling(
-                allowed_updates=ALLOWED_UPDATES, drop_pending_updates=True
-            )
-        except (InvalidToken, TelegramError, OSError) as exc:
-            self.status, self.detail = "error", f"{type(exc).__name__}: {exc}"
-            log.error("Telegram bot skipped: %s", self.detail)
-            await self._safe_shutdown(app)
+        self.status, self.detail = "starting", "connecting to Telegram"
+        self._task = asyncio.create_task(self._run(), name="telegram-bot")
+
+    async def wait_started(self) -> None:
+        """Await the background startup loop (tests / scripts)."""
+        if self._task is not None:
+            await self._task
+
+    async def _run(self) -> None:
+        while True:
+            self.attempts += 1
+            app = self._factory(self.token, self.store)
+            try:
+                await app.initialize()  # getMe -> validates the token
+                await app.start()
+                await app.updater.start_polling(
+                    allowed_updates=ALLOWED_UPDATES, drop_pending_updates=True
+                )
+            except asyncio.CancelledError:
+                await self._safe_shutdown(app)
+                raise
+            except InvalidToken as exc:  # permanent: retrying can't help
+                self.status = "error"
+                self.detail = f"InvalidToken: {exc} - fix TELEGRAM_BOT_TOKEN in .env and restart"
+                log.error("Telegram bot disabled: %s", self.detail)
+                await self._safe_shutdown(app)
+                return
+            except (TelegramError, OSError) as exc:  # transient: timeout, network, 429, 409
+                delay = retry_delay(exc, self.attempts)
+                reason = f"{type(exc).__name__}: {exc}"
+                self.status = "starting"
+                self.detail = f"attempt {self.attempts} failed ({reason}); retry in {delay:.0f}s"
+                log.warning("Telegram bot not up yet (%s) - retrying in %.0f s", reason, delay)
+                await self._safe_shutdown(app)
+                await self._sleep(delay)
+                continue
+            self._app = app
+            self.status, self.detail = "running", f"@{app.bot.username}"
+            log.info("Telegram bot running as @%s (attempt %d)", app.bot.username, self.attempts)
             return
-        self._app = app
-        self.status, self.detail = "running", f"@{app.bot.username}"
-        log.info("Telegram bot running as @%s", app.bot.username)
 
     async def stop(self) -> None:
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            await asyncio.gather(self._task, return_exceptions=True)
         if self._app is not None:
             await self._safe_shutdown(self._app)
             self._app = None
 
     @staticmethod
-    async def _safe_shutdown(app: Application) -> None:  # type: ignore[type-arg]
+    async def _safe_shutdown(app: Any) -> None:
         try:
             if app.updater is not None and app.updater.running:
                 await app.updater.stop()
