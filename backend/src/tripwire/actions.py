@@ -524,6 +524,8 @@ class ActionFlow:
             )
         elif self.mode == "reply" and self.reply is not None:
             base.update(to=self.reply.target.name, text=self.reply.text, source=self.reply.source)
+            if self.result is not None:  # keep the fill visible: a template draft is instant
+                base.update(result_status=self.result.status, result_message=self.result.message)
         elif self.mode == "result" and self.result is not None:
             r = self.result
             base.update(

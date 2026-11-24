@@ -181,8 +181,8 @@ def test_reply_offer_replaces_the_result_and_tap_sends() -> None:
     assert flow.offer_reply(offer, token) is not None and flow.mode == "reply"
     assert flow.ui(0, trading=True) == {
         "mode": "reply", "coin": None, "to": "@alice", "text": "Trimmed half of my ETH.",
-        "source": "template",
-    }  # fmt: skip
+        "source": "template", "result_status": "filled", "result_message": "Filled 0.25 @ 1,684.9",
+    }  # fmt: skip  # the fill stays on screen above the offer (found in the simulator check)
     assert flow.handle("next", position=None, now=0, trading=True).send_reply is None  # swipe: no
     out = flow.handle("tap", position=None, now=0, trading=True)
     assert out.send_reply == offer and flow.mode == "hud"

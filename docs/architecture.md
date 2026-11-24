@@ -2,8 +2,15 @@
 
 Tripwire is a trading-session risk co-pilot: live Hyperliquid **testnet** positions on Even
 Realities G2 glasses, navigated with ring/temple taps, plus a Telegram Business bot for messages
-and (later) alerts. Day 1: read-only HUD + bot skeleton. Day 2: ROE, an actions menu on tap, and
-**reduce-only closes (25 / 50 / 100 %) behind a two-tap confirm**, signed with the agent key.
+and alerts.
+- Day 1: read-only HUD + bot skeleton.
+- Day 2: ROE, an actions menu on tap, and **reduce-only closes (25 / 50 / 100 %) behind a
+  two-tap confirm**.
+- Day 2 continued:
+  - WATCH mode; a **policy guard** on one order path; an **exchange adapter** interface;
+    **DRY_RUN** signing.
+  - Stop-loss moves; **liquidation alerts** (glasses or Telegram DM).
+  - Forward-to-bot **order drafts**; the Business inbox line, reply drafts, `/status`.
 
 ## Components
 
@@ -25,17 +32,47 @@ and (later) alerts. Day 1: read-only HUD + bot skeleton. Day 2: ROE, an actions 
  ┌─────────────────────────── laptop ─────┼───────────────────────────────────────────────┐
  │ backend/  FastAPI + uvicorn (Python 3.12, one asyncio event loop)                       │
  │   main.py   create_app(): testnet guard → state → feed task → bot → routes              │
- │   ws.py     /ws  (pairing, hud frames ≤ 2/s, heartbeats, intents → ActionFlow)          │
- │   actions.py  per-client screen: hud → menu → two-tap confirm → sending → result         │
- │   trading.py  reduce-only IOC closes ── POST /exchange (agent key) ──► HL TESTNET        │
+ │   ws.py     /ws  (pairing, hud frames ≤ 2/s, heartbeats, intents → ActionFlow), ClientHub│
+ │   actions.py  per-client screens: hud → menu(actions|sl|alert|draft) → confirm →         │
+ │               sending → result → reply                                                  │
+ │   orders.py   Close/Stop/OpenOrder + OrderService.submit  ◄── THE only order path       │
+ │   policy.py   PolicyGuard: reduce-only free; opens need SL, ≤$250, ≤5x, loss lock, kill  │
+ │   exchanges/  ExchangeAdapter: hyperliquid.py (sign → POST /exchange or DRY_RUN log),    │
+ │               fake.py (in-memory), bybit_demo.py (stub)                                  │
+ │   risk.py     RiskEngine (threshold, hysteresis, snooze) + AlertService (glasses / DM)   │
+ │   drafts.py   forwarded text → OrderDraft (regex, no LLM)                               │
+ │   inbox.py    business messages → HUD line (30 chars, memory only)                       │
+ │   replies.py  ≤60-char reply drafts: OpenRouter (facts only) → template fallback         │
+ │   trading.py  pure order helpers (rounding, reply parsing)                              │
  │   hud.py    MarketState + ui → JSON frame                                               │
- │   state.py  MarketState (mids, marks, positions, listeners)                             │
+ │   state.py  MarketState (mids, marks, positions, listeners; own / WATCH / price mode)   │
  │   hl/feed.py      ── wss://api.hyperliquid-testnet.xyz/ws ──► Hyperliquid TESTNET       │
  │   hl/positions.py pure math: uPnL, uPnL %, ROE, liq distance                            │
- │   telegram_bot.py ── long polling ──► api.telegram.org (Bot API)                        │
- │   db.py     SQLite: business_connections, intent_log, order_log (metadata only)         │
+ │   telegram_bot.py ── long polling ──► api.telegram.org (Bot API): /start /status /kill  │
+ │                   /unkill /threshold, drafts, business inbox, owner DMs                  │
+ │   db.py     SQLite: business_connections, intent_log, order_log, kv (metadata only)     │
  └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+## The one order path
+
+```
+glasses tap (arm) ── PolicyGuard.check (precheck: block reason instead of a confirm)
+glasses tap (confirm, 0.3–5 s later)
+        │
+        ▼
+OrderService.submit(order)  ── guard.refresh() (realized PnL today) ── guard.check() ── blocked? → result "BLOCKED"
+        │
+        ▼
+adapter.close_reduce_only / set_sl / place_order   (exchanges/, chosen by order.kind in ws.send_order)
+        │
+        ▼
+hyperliquid.py: build wire (SDK helpers) → assert_testnet → sign_l1_action(is_mainnet=False)
+        → DRY_RUN? log + dry_run_orders.jsonl : POST /exchange
+```
+
+Alerts and drafts never send anything themselves. They put a menu on the glasses, and every
+action they offer goes through the same two taps and the same `submit()`.
 
 ## Data flow (one price tick)
 
@@ -145,6 +182,10 @@ exists on the API — see `docs/BUILD_LOG.md` §0/§2.
 
 ## Next (not built yet)
 
-- First live close on a funded testnet account (needs the faucet + an approved agent wallet).
-- Risk alerts (liq distance thresholds on mark) to glasses + Telegram.
+- First live orders on a funded testnet account (needs the faucet + an approved agent wallet,
+  then `DRY_RUN=false`). Verify in order: close → SL move (the `positionTpsl` size convention) →
+  forwarded open.
+- Real Telegram: set `TELEGRAM_OWNER_ID`, then check an alert DM and a real forward. Business inbox
+  and replies need Premium.
+- Real glasses (swipe direction, the `▲` glyph on hardware).
 - Day 6: per-module docs, decision log, how-to guide.

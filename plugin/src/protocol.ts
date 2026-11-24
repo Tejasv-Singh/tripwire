@@ -140,6 +140,9 @@ export interface ReplyScreen {
   to: string // "@alice"
   text: string // <= 60 characters
   source: 'openrouter' | 'template'
+  /** the order result the offer follows (kept on screen) */
+  result_status?: ResultStatus
+  result_message?: string
 }
 
 /** Which screen the backend's ActionFlow is on for this client (actions.py). */

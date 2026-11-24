@@ -1115,3 +1115,60 @@ How the draft text is made:
   - **End to end:** inbox line on the HUD → Close 50% → filled → reply offer → tap → sent with
     the right connection and chat.
 - Plugin: 37 tests (TG line, reply screen, 2x = back on the reply screen).
+
+### 21. Exit check in the simulator (2026-11-24, ~17:28–17:33 IST)
+
+**New tool for it: `npm run backend:demo`** (`backend/scripts/demo.py`).
+- Port 8010. It uses the real `.env` (pairing code, bot token, owner id).
+- The **fake exchange** holds a 0.5 ETH long (entry 1,650, liq 1,420, stop 1,500) on **live
+  testnet prices**. `--watch 0x...` uses WATCH mode instead.
+- It **never starts Telegram polling**: a second poller with the same token would fight the
+  real backend (HTTP 409).
+- Alert "DMs" are sent with a plain `sendMessage` when `TELEGRAM_OWNER_ID` is set. Otherwise
+  they're recorded at `GET /demo/dms`.
+- Localhost-only routes inject a forwarded message (through the **real** bot draft handler), a
+  threshold change, or a business message.
+- Vite ran on :5174 (`VITE_BACKEND_URL=http://127.0.0.1:8010`), and the simulator was driven
+  through its automation API.
+- Screenshots: `docs/screenshots/day2/`.
+- First run bug, fixed: `Settings.model_copy(update=...)` doesn't validate, so `db_path` stayed a
+  string. The demo now builds `Settings(**{**dumped, **overrides})`.
+
+| Exit-check item | Result | Screenshot |
+|---|---|---|
+| WATCH mode shows a real testnet position live | ✅ Watched `0x7149...7bd0` (found by `watch:find`): `TRIPWIRE WATCH` / `BTC-PERP LONG 0.2325 @ 59,658  10x` / `uPnL +$66.05 (+0.5%)  ROE +4.8%` / `Liq 49,860  16.8% away`. 12 s later uPnL read `+$61.52`. A tap was refused: `ack tap -> hud (watch only)` | 01, 02 |
+| Lowering the bar fires an alert on the glasses | ✅ At the default 5 % nothing fired (16.8 % away). `POST /demo/threshold 20` (= `/threshold 20`) put **`▲ RISK  BTC-PERP LONG 0.2325` / `Liq 49,860  16.8% from mark (<20%)`** / Move SL / Close 50% / Close all / Snooze 5m on the glasses. `/healthz → alerts.last.delivered_to = "glasses (1)"`. **The `▲` glyph renders in the simulator** | 03 |
+| …and with the plugin closed, a Telegram DM | ✅ in code ⚠️ not delivered to a phone. With the simulator closed (`ws_clients=0`), `/threshold 19` re-armed it and the alert went to the Telegram notifier with the full DM text (`▲ RISK  BTC-PERP LONG 0.23249` / `Liquidation 49,860.4 is 16.8% from mark 59,943 (alert at 19%).` / …). **`TELEGRAM_OWNER_ID` is not set in `.env`**, so it was recorded (`delivered_to_telegram: false`), not sent. Set the owner id (from `/start`) to receive it | — |
+| "SL to breakeven" through the confirm, against the fake exchange | ✅ Tap → Move SL... → `MOVE SL  ETH-PERP LONG 0.50` / `SL now 1,500  entry 1,650  mark 1,702` → SL to breakeven → `CONFIRM  SL to breakeven` / `SL 1,500 -> 1,650  reduce-only` / `new SL placed first, then old cancelled` → tap → `PLACED  SL set at 1650; old SL cancelled` | 05, 06, 07 |
+| Forwarding `BTC long 96.5k sl 95k tp 99k` shows the draft screen | ✅ Bot reply: `FORWARDED - your instruction, not advice` / `BTC LONG $100 1x @ 96,500  SL 95,000  TP 99,000` / `Defaults used: notional, leverage` / `Policy: OK - within limits, has a stop-loss` / `On your glasses now: two taps to confirm.` Glasses: the same, with Place order / Discard. Place → `CONFIRM  Place order  BTC-PERP LONG` / `BUY ~0.001036 BTC  $100 1x  @96,500` / `SL 95,000  TP 99,000  attached` / `your forwarded instruction, not advice` | 08, 09 |
+| An over-limit draft is blocked by the policy guard with a clear reason | ✅ `BTC long 96.5k sl 95k tp 99k $1000` → bot: `BLOCKED by policy: Notional $1,000 > max $250`; glasses: `BLOCKED: Notional $1,000 > max $250` with **only** Discard | 10 |
+| (bonus) business message line | ✅ `TG 1 new @alice: still in that ETH long or ou~` on the HUD (the 30-character preview plus the name hits 46 columns, so `fit` ends it with `~`) | 04 |
+
+**UX bug found by the exit check and fixed:**
+- After the SL move, the **reply offer replaced the `PLACED` result almost instantly**, because
+  template drafts take no time. The user could miss the confirmation.
+- Fix: the reply screen keeps the result as its first line (`PLACED  SL set at 1650; old SL
+  cancelled` / `REPLY to @alice on Telegram?` / `"Moved my ETH stop to 1,650."` /
+  `drafted from a template`). `ui` gains `result_status` and `result_message`.
+- Re-checked in the simulator (screenshot 07); tests updated.
+
+**What was NOT verified, and why:**
+- A real DM to a phone: no `TELEGRAM_OWNER_ID`.
+- A real Telegram forward: the exit check injected text through the same handler. Forwarding
+  from the phone needs the owner id and the real backend (the demo doesn't poll).
+- Business messages and replies on real Telegram: Premium.
+- Any order on Hyperliquid: no funded account. Dry run is proven by signature recovery (§16),
+  the fake exchange covers the flows, and `positionTpsl` sizing stays the first thing to verify
+  live (§15).
+- Real glasses.
+
+**Housekeeping in this commit:**
+- `httpx` and `eth-account` are now **declared** backend dependencies (imported directly since
+  §15/§20; they were transitive before; `uv.lock` updated).
+- The outdated pyproject comment about the SDK's WebsocketManager now says the SDK is pinned for
+  the signing wire format.
+- README (features, "Try it without an account", Telegram commands, dry run, safety rules 3/4/7,
+  privacy, troubleshooting), `docs/ws-protocol.md` (v2 additions) and `docs/architecture.md`
+  (modules, the one order path, next steps) updated.
+
+Final state: **268 backend tests**, **37 plugin tests**; ruff, mypy strict and tsc clean.

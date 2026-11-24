@@ -9,6 +9,58 @@ frame carries `ui` (which screen to draw: HUD, menu, confirm, sending or result)
 `position` has `roe_pct`. `ack` has `mode` and can be `ok: false`. There's a new `order` frame. The
 backend owns the menu and the two-tap confirm; the plugin only draws what `ui` says.
 
+## v2 additions (Day 2 continued, all additive: `v` stays 2)
+
+The sections below describe the Day-2 shape. These fields were added on top. A client that
+ignores them still works, and a missing `kind` / `action` means the Day-2 meaning.
+
+**`hud` frame:**
+
+| Field | Meaning |
+|---|---|
+| `watch` (bool) | positions belong to `WATCH_ADDRESS` (someone else's, read-only). The plugin shows `TRIPWIRE WATCH` and a tap answers `watch only` |
+| `address` (str) | the streamed address, shortened (`0x7149...7bd0`), or `""` |
+| `inbox` (object \| null) | Telegram Business messages of the last 10 min: `{"count": 1, "from": "@alice", "preview": "<first 30 chars>"}` |
+| `trading.dry_run` (bool) | orders are signed and logged, not sent. The plugin shows `TRIPWIRE DRY RUN` |
+| `trading.exchange` (str) | `hyperliquid` / `fake` (`TRIPWIRE DEMO`) / `bybit_demo` |
+
+**`ui` with `mode: "menu"` has a `kind`:**
+
+| `kind` | `items` | extra fields |
+|---|---|---|
+| `actions` | Close 25% / Close 50% / Close 100% / Move SL... / Back | — |
+| `sl` | SL to breakeven / SL tighter 1% / Back | `sl_loaded` (bool), `current_sl` (number \| null, fetched from the exchange when the submenu opens) |
+| `alert` | Move SL / Close 50% / Close all / Snooze 5m | `alert: {coin, side, size, liq_px, liq_dist_pct, mark, threshold_pct}` |
+| `draft` | Place order / Discard (only Discard if blocked) | `draft: {coin, side, notional_usd, leverage, entry_px (null = market), sl_px, tp_px, defaults[]}`, `policy: {allowed, rule, reason}` |
+
+An `alert` or `draft` menu appears **on its own**: risk.py or a forwarded Telegram message
+raises it. If a confirm or an order is in progress, it waits until that screen is left.
+
+**`ui` with `mode: "confirm"` / `"sending"` has an `action`:**
+- `close`: the fields documented below.
+- `stop`: `old_sl` (null if none), `new_sl`, `mark`, `entry`, `size`.
+- `open`: `notional`, `leverage`, `entry` (null = market), `sl`, `tp`, `size` (an estimate), `exact`.
+
+**New `ui` mode `reply`** (after a real fill, if a business chat wrote in the last 30 min):
+```json
+{"mode": "reply", "coin": "ETH", "to": "@alice", "text": "Moved my ETH stop to 1,650.",
+ "source": "template", "result_status": "placed", "result_message": "SL set at 1650; old SL cancelled"}
+```
+Intents on this screen: `tap` sends the reply and returns to the HUD; `back` skips; `next` /
+`prev` do nothing. It skips itself after 20 s.
+
+**Result statuses** (`ui.status`, `order.status`): `filled`, `resting`, `placed` (trigger orders,
+stop moves), `rejected`, `error`, **`blocked`** (policy guard; nothing sent) and **`dry_run`**
+(signed, logged, not sent).
+
+**Frames:**
+- `order` gains `kind` (`close` / `stop` / `open`). `fraction` is `null` except for closes.
+- New `{"type": "reply", "ok": true, "to": "@alice"}` after a reply was sent (or failed).
+
+**`ack.note`** may also say: `watch only`, `draft discarded`, `alert snoozed 5 min`,
+`sending reply to @alice`, `reply skipped`, `loading the current stop-loss - tap again`, or
+`Blocked: <policy reason>`.
+
 ## Endpoint and auth
 
 ```

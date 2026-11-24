@@ -265,7 +265,9 @@ export function inboxLine(f: HudFrame): string | null {
 
 function replyLines(ui: ReplyScreen): string[] {
   const by = ui.source === 'openrouter' ? 'drafted by OpenRouter' : 'drafted from a template'
-  return [`REPLY to ${ui.to} on Telegram?`, ...wrap(`"${ui.text}"`, MAX_COLS).slice(0, 2), by]
+  // the fill stays visible above the offer (a template draft replaces the result instantly)
+  const done = ui.result_status ? [`${RESULT_TITLES[ui.result_status]}  ${ui.result_message ?? ''}`.trimEnd()] : []
+  return [...done, `REPLY to ${ui.to} on Telegram?`, ...wrap(`"${ui.text}"`, MAX_COLS).slice(0, 2), by]
 }
 
 function screenLines(f: HudFrame): string[] {

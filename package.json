@@ -8,6 +8,7 @@
     "setup": "uv --directory backend sync && npm --prefix plugin install",
     "backend:dev": "uv --directory backend run uvicorn tripwire.main:create_app --factory --host 127.0.0.1 --port 8000 --reload --reload-dir src",
     "backend:start": "uv --directory backend run uvicorn tripwire.main:create_app --factory --host 127.0.0.1 --port 8000",
+    "backend:demo": "uv --directory backend run python scripts/demo.py",
     "backend:test": "uv --directory backend run pytest",
     "backend:check": "uv --directory backend run ruff check . && uv --directory backend run ruff format --check . && uv --directory backend run mypy",
     "plugin:dev": "npm --prefix plugin run dev",

@@ -842,7 +842,9 @@ name = "tripwire-backend"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "eth-account" },
     { name = "fastapi" },
+    { name = "httpx" },
     { name = "hyperliquid-python-sdk" },
     { name = "pydantic-settings" },
     { name = "python-telegram-bot" },
@@ -860,7 +862,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "eth-account", specifier = ">=0.13" },
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "httpx", specifier = ">=0.28" },
     { name = "hyperliquid-python-sdk", specifier = "==0.24.0" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "python-telegram-bot", specifier = ">=21.6" },

@@ -259,6 +259,13 @@ describe('action screens', () => {
     expect(lines.slice(1, 4)).toEqual(['REPLY to @alice on Telegram?', '"Trimmed half of my ETH."', 'drafted from a template'])
     expect(lines.at(-1)).toBe('tap: send reply  2x: skip')
     assertFits(at({ ...reply, text: 'x'.repeat(60), to: '@' + 'y'.repeat(40) }))
+    // the fill result stays on screen above the offer
+    const withResult = at({ ...reply, result_status: 'placed', result_message: 'SL set at 1650; old SL cancelled' })
+    expect(withResult.split('\n').slice(1, 3)).toEqual([
+      'PLACED  SL set at 1650; old SL cancelled',
+      'REPLY to @alice on Telegram?',
+    ])
+    assertFits(withResult)
   })
 
   it('renders the RISK alert screen with its four actions', () => {

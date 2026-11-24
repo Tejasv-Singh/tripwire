@@ -3,9 +3,16 @@
 **A trading-session risk co-pilot for Even Realities G2 smart glasses.**
 Tripwire puts your Hyperliquid **testnet** positions in the corner of your eye: size, entry,
 live uPnL, ROE and how far you are from liquidation. You flip between positions with a swipe on
-the ring or temple. A tap opens a menu that can **cut a position by 25 / 50 / 100 %**: reduce-only,
-and only after a second, deliberate tap. A Telegram Business bot handles messages and, later,
-alerts.
+the ring or temple. A tap opens a menu that can **cut a position by 25 / 50 / 100 %** or **move its
+stop-loss** (to breakeven, or 1 % tighter): every order reduces risk, passes a policy guard, and
+is sent only after a second, deliberate tap.
+
+When a position gets within 5 % of liquidation, the glasses show a **▲ RISK** screen with those
+actions and a 5-minute snooze. If the glasses are off, the Telegram bot DMs you instead. Forward a
+trade idea like `BTC long 96.5k sl 95k tp 99k` to the bot and it appears on the glasses as a
+draft, checked against hard limits ($250, 5x, stop-loss required, daily loss lock, kill switch).
+Messages in your Telegram Business chats show up as one line on the HUD, and after a fill you can
+send a short drafted reply with one tap.
 
 Built for the **Heads Up** hackathon. Tracks: **Crypto & DeFi** and **Messaging**.
 
@@ -30,10 +37,12 @@ Tap again within 5s to SEND.
 tap: SEND  swipe/2x: cancel
 ```
 
-> **Status: Day 2.** The HUD is live, the Telegram bot runs, and the actions menu with two-tap
-> reduce-only closes is built and tested end to end in the simulator (against a fake exchange).
-> It hasn't placed a real testnet order yet, because that needs a funded testnet account and an
-> agent key. With no account configured, the HUD shows the live ETH mark price.
+> **Status: Day 2 complete (no funded account needed).** Everything below runs and is tested end
+> to end in the simulator. The real-data parts are WATCH mode (any public testnet address) and
+> DRY_RUN (really signed testnet orders that are never sent). The order and stop-loss flows are
+> also shown on an in-memory fake exchange (`npm run backend:demo`). No order has been sent to
+> Hyperliquid yet, because that needs a funded testnet account and an approved agent key.
+> Screenshots: [docs/screenshots/day2/](docs/screenshots/day2/).
 
 ## How it works
 
@@ -49,7 +58,13 @@ G2 glasses ◄─BLE─► Even App (phone) running plugin/ ──wss/https─�
   It holds no API keys.
 - **`backend/`**: Python 3.12, FastAPI, uvicorn and SQLite. It streams Hyperliquid testnet data,
   normalises positions, and pushes a JSON `hud` frame to the glasses at most every 500 ms.
-  Every third-party call happens here.
+  Every third-party call happens here. The main modules:
+  - `actions.py`: the screens and the two-tap confirm.
+  - `orders.py` and `policy.py`: the single order path and its guard.
+  - `exchanges/`: the Hyperliquid, fake and Bybit-demo adapters.
+  - `risk.py`: liquidation alerts.
+  - `drafts.py`: the forward parser.
+  - `inbox.py` and `replies.py`: Telegram Business.
 - **`docs/`**: [architecture](docs/architecture.md), [WebSocket protocol](docs/ws-protocol.md),
   and the [build log](docs/BUILD_LOG.md) (every decision and deviation, with where each knob lives).
 
@@ -70,11 +85,17 @@ if you want to use real glasses.
    - `PAIRING_CODE` is required. Generate one with
      `python -c "import secrets; print(secrets.token_urlsafe(12))"`.
    - `HL_ACCOUNT_ADDRESS` is optional. Leave it empty to see only the ETH price.
-   - `TELEGRAM_BOT_TOKEN` is optional. Leave it empty and the bot is skipped.
-   - `HL_AGENT_KEY` is optional. Without it (or without `HL_ACCOUNT_ADDRESS`) the menu still
-     opens, but trading is off and nothing can be sent. See
-     [Trading on testnet](#trading-on-testnet-optional).
-   - `ANTHROPIC_API_KEY` is not used yet.
+   - `WATCH_ADDRESS` is optional. With no account set, it follows any public testnet address
+     read-only (`npm run watch:find` lists some).
+   - `TELEGRAM_BOT_TOKEN` and `TELEGRAM_OWNER_ID` are optional. With an empty token the bot is
+     skipped. Without an owner id, nobody can use `/status`, `/kill`, `/threshold` or forwarded
+     drafts, and alerts can't be DMed.
+   - `HL_AGENT_KEY` is optional. `DRY_RUN=true` (the default) signs real testnet orders with a
+     throwaway key and never sends them. See [Trading on testnet](#trading-on-testnet-optional).
+   - `OPENROUTER_API_KEY` is optional. Without it, reply drafts use templates.
+     `ANTHROPIC_API_KEY` is not used.
+   - The policy limits (`MAX_OPEN_NOTIONAL_USD`, `MAX_LEVERAGE`, `DAILY_LOSS_LIMIT_USD`,
+     `KILL_SWITCH`) and the alert settings (`ALERT_LIQ_PCT`, ...) have safe defaults.
 3. **Configure the plugin.** Copy `plugin/.env.example` to `plugin/.env.local`. Set
    `VITE_BACKEND_URL` to your HTTPS backend origin, and `VITE_PAIRING_CODE` to the same value as
    `PAIRING_CODE`. The pairing code is only read in development builds.
@@ -102,7 +123,26 @@ if you want to use real glasses.
 
 **Checks:** `npm test` runs the backend pytest suite and the plugin vitest suite.
 `npm run check` also runs ruff, strict mypy and tsc. `curl http://127.0.0.1:8000/healthz` shows
-the feed and bot status.
+the feed, trading, policy, alert and bot status.
+
+### Try it without an account
+
+- **WATCH a real testnet position:** run `npm run watch:find`, put one of the listed addresses in
+  `.env` as `WATCH_ADDRESS=0x...`, and restart the backend. The header says `TRIPWIRE WATCH`,
+  positions are live, alerts work, and tapping says "watch only".
+- **Demo with a fake exchange:** `npm run backend:demo` serves a fake 0.5 ETH long (with a stop)
+  on live testnet prices at `http://127.0.0.1:8010`. Point a second Vite at it:
+  ```powershell
+  $env:VITE_BACKEND_URL='http://127.0.0.1:8010'; npm --prefix plugin run dev -- --port 5174
+  ```
+  then `node plugin/node_modules/@evenrealities/evenhub-simulator/bin/index.js http://localhost:5174`.
+  The header says `TRIPWIRE DEMO`.
+  - Demo-only, localhost-only routes:
+    - `POST /demo/forward {"text": "BTC long 96.5k sl 95k tp 99k"}` (as if you'd forwarded it
+      to the bot)
+    - `POST /demo/threshold {"pct": 20}`
+    - `POST /demo/business {"name": "@alice", "text": "still in?"}`
+  - `npm run backend:demo -- --watch 0x...` does the same in WATCH mode.
 
 ### Trading on testnet (optional)
 
@@ -116,9 +156,13 @@ withdraw.
    It is the agent key, not your main wallet key.
 3. In `.env`, set `HL_ACCOUNT_ADDRESS` to your **main** account address (not the agent's) and
    `HL_AGENT_KEY` to the agent's private key. Restart the backend.
-4. The backend log shows `Trading ready on testnet: agent wallet 0x1234...abcd`, and `/healthz`
-   shows `trading.status` = `ready`.
-5. Open a small position on the testnet site. It shows up on the glasses within a few seconds.
+4. **Dry run first.** With `DRY_RUN=true` (the default), the header says `TRIPWIRE DRY RUN`.
+   Every confirmed order is built and signed exactly like a live one, logged, appended to
+   `backend/data/dry_run_orders.jsonl`, and **not sent**. The result screen says `DRY RUN`.
+5. **Then go live:** set `DRY_RUN=false` and restart. The log shows
+   `Trading LIVE on testnet: agent key 0x1234...abcd`, and `/healthz` shows
+   `trading.dry_run: false`.
+6. Open a small position on the testnet site. It shows up on the glasses within a few seconds.
    Tap, swipe to `Close 25%`, tap, check the confirm screen, then tap again within 5 s.
 
 On the glasses:
@@ -126,12 +170,19 @@ On the glasses:
 | Screen | Tap | Swipe | Double tap |
 |---|---|---|---|
 | HUD | open the actions menu | next / previous position | exit the app |
-| Menu | choose (Close 25 / 50 / 100 %, Back) | move the cursor | back to the HUD |
+| Menu (actions / Move SL / RISK alert / forwarded draft) | choose the item | move the cursor | back to the HUD |
 | Confirm | **send** (between 0.3 s and 5 s after choosing) | cancel, back to the menu | cancel, back to the HUD |
 | Result | back to the HUD (also after 8 s) | same | same |
+| Reply offer (after a fill) | send the reply | nothing | skip (also after 20 s) |
 
-Every confirmed close is a reduce-only IOC order at mid ± 5 %. It is written to the SQLite
-`order_log` table (`backend/data/tripwire.sqlite3`) along with Hyperliquid's answer.
+- **Actions menu:** Close 25 % / 50 % / 100 % (reduce-only IOC at mid ± 5 %), or Move SL... →
+  **SL to breakeven** (stop at entry) or **SL tighter 1 %** (the current stop moved 1 % of mark
+  toward the price).
+- The new stop is placed first, and the old one is cancelled after that.
+- A stop that would fire at once, or that is looser than the current one, is refused with the
+  reason.
+- Every order goes through the **policy guard** (see Safety rules) and is written to the SQLite
+  `order_log` table (`backend/data/tripwire.sqlite3`) along with the exchange's answer.
 
 ### Telegram bot (optional)
 
@@ -143,12 +194,28 @@ Every confirmed close is a reduce-only IOC order at mid ± 5 %. It is written to
 3. Put the token in `.env` as `TELEGRAM_BOT_TOKEN=…`, then restart the backend. Auto-reload only
    watches `backend/src`, not `.env`.
 4. The backend log shows `telegram=starting`, then `Telegram bot running as @your_bot`.
-   `/healthz` → `telegram.status` is `running`. Send the bot `/start` (you should get an intro) and
-   forward it any message (you should get `Echo: …`).
+   `/healthz` → `telegram.status` is `running`. Send the bot `/start`. The reply includes **your
+   numeric user id**. Put it in `.env` as `TELEGRAM_OWNER_ID=...` and restart. Everything below
+   is owner-only:
+   - `/status`: positions, uPnL, trading mode, kill switch, alert threshold.
+   - `/kill` / `/unkill`: block / allow every order that adds exposure. Closes and tighter stops
+     still work. The setting survives restarts; `KILL_SWITCH=true` in `.env` can't be undone from
+     Telegram.
+   - `/threshold 8`: liquidation alerts at 8 % (shows the current value without a number).
+   - **Forward (or type) a trade idea**, e.g. `BTC long 96.5k sl 95k tp 99k`,
+     `ETH short @3400 SL 3480 TP 3200 3x $200`. The bot answers with the parsed draft and the
+     policy verdict, and the glasses show `FORWARDED - your instruction, not advice` with Place
+     order / Discard (Discard only if blocked). Ambiguous text is refused with the reason
+     (`which price is 95k? label it (sl / tp / @entry)`).
+   - **Risk alerts:** with no glasses connected, an alert arrives as a DM.
 5. Connecting the bot to your other chats needs **Telegram Premium**:
    Settings → Telegram Business → Chatbots → `@your_bot` → pick the chats. The backend then logs
-   `business_connection …`. Without Premium, `/start`, the echo and future alerts in the bot's own
-   chat still work.
+   `business_connection …`.
+   - New messages show on the HUD as `TG 1 new @name: <first 30 characters>`.
+   - After a real fill, the glasses offer a ≤ 60-character reply to the last chat: tap to send,
+     double tap to skip. It's drafted by OpenRouter if `OPENROUTER_API_KEY` is set, otherwise
+     from a template.
+   - Without Premium, everything except these two works.
 
 The bot connects in the background and never blocks or crashes the backend. On timeouts or
 Telegram flood control (HTTP 429) it retries with growing gaps: 5 s, doubling, capped at 300 s,
@@ -166,7 +233,12 @@ and never less than Telegram's `retry_after`. Only a rejected token stops it for
 | Log says `Telegram bot not up yet (TimedOut …)` or `(RetryAfter …)` | Telegram is slow or throttling the bot. Leave the backend running, because it retries by itself. Every restart or manual test call makes another request and extends the throttle. A brand-new bot took about 18 minutes to get through (9 attempts) on the first day. If it's still failing after about 30 minutes, `/revoke` the token in BotFather and put the new one in `.env`. |
 | Log shows `Telegram polling hiccup (NetworkError: httpx.ReadError …) - reconnecting automatically` | Harmless. Telegram dropped the long-poll connection and the library reconnects by itself. `/healthz` → `telegram.status` stays `running`. (Before Day 2 this printed as a 40-line `Exception happened while polling for updates` traceback.) |
 | `/healthz` says `telegram: error … InvalidToken` | The token in `.env` is wrong (a missing character or an extra space). Fix it and restart. |
-| Menu says `Trading off: read-only (no agent key)` | `HL_ACCOUNT_ADDRESS` and `HL_AGENT_KEY` must both be set in `.env`. Restart the backend after editing `.env`. |
+| The bot answers `Not authorized.` | `TELEGRAM_OWNER_ID` is empty or isn't your id. `/start` tells you your id. Restart after editing `.env`. |
+| The bot answers `Not an order I can draft: ...` | The text was ambiguous (two coins, an unlabelled price, both long and short ...). Label every price: `sl 95k`, `tp 99k`, `@96.5k`. |
+| The glasses show `BLOCKED: ...` on a draft or instead of a confirm | The policy guard refused it, and the reason is the rule. Limits: $250 notional, 5x, a stop-loss on every opening order, the daily loss lock, the kill switch. Stops must be tighter than the current one and on the safe side of mark. |
+| The result says `DRY RUN: ... signed, not sent` | `DRY_RUN=true` (the default). The signed payload is in `backend/data/dry_run_orders.jsonl`. Set `DRY_RUN=false` (with an agent key) to really send. |
+| No risk alert although a position is close to liquidation | Alerts need markPx (positions past the 25th coin fall back to mid and are skipped) and fire once per approach. They re-arm after the distance is back above threshold + 1 %. Check `/healthz → alerts` and `/threshold`. |
+| Menu says `Trading off: read-only (no agent key)` | Set `HL_ACCOUNT_ADDRESS` and either `HL_AGENT_KEY` or `DRY_RUN=true`. Restart the backend after editing `.env`. |
 | Backend won't start: `HL_AGENT_KEY must be empty or a 64-hex-char private key` | The value isn't a private key. Copy the agent's private key (64 hex characters, `0x` optional), not its address. |
 | Result: `User or API Wallet ... does not exist` | The agent wallet isn't authorized for that account on **testnet**, or `HL_ACCOUNT_ADDRESS` is the agent's address instead of the main account's. |
 | Result: `Order could not immediately match ...` | The IOC order found no liquidity within 5 % of mid, which is common on thin testnet books. Nothing was filled; try again. |
@@ -182,20 +254,35 @@ and never less than Telegram's `retry_after`. Only a rejected token stops it for
 2. **Agent key only.** Orders are signed with a Hyperliquid **API/agent wallet** key
    (`HL_AGENT_KEY`), never your main wallet key. Agent wallets can't withdraw funds. Only the
    agent's public address is ever logged.
-3. **Reduce-only.** The only order the glasses can send is a `reduce_only` IOC close of 25, 50
-   or 100 % of a position. It can shrink or close a position but never open, grow or flip one.
-   No menu item opens a position.
-4. **Two-tap confirm.** The first tap shows the exact order (side, size, price, slippage). Only
-   a second tap 0.3–5 s later sends it, and only if the position is still open on the same side.
-   The backend enforces this, so a buggy or replayed client can't skip it.
+3. **Reduce-only by default, one guarded path for everything else.** The glasses' own menus only
+   offer risk-reducing orders: reduce-only IOC closes, and stop-losses that may only get
+   tighter. The only way to open a position is your own forwarded instruction. **Every** order
+   goes through one policy guard (`policy.py`) via one path (`OrderService.submit`):
+   - Closes and tighter stops are always allowed, even with the kill switch on.
+   - Opening orders need a stop-loss, at most **$250** notional and **5x**. They're blocked by
+     the **daily realized-loss lock** ($100, UTC day) and by the **kill switch**
+     (`KILL_SWITCH=true` or `/kill`).
+4. **Two-tap confirm.** The first tap shows the exact order (side, size, price, slippage or the
+   stop move). Only a second tap 0.3–5 s later sends it, and only if the guard still agrees and
+   the position is still open on the same side. The backend enforces this, so a buggy or
+   replayed client can't skip it.
 5. **No advice.** Tripwire shows numbers you can verify (position, uPnL, liquidation distance).
-   It doesn't tell you what to trade. Nothing here is financial advice.
+   It doesn't tell you what to trade. A forwarded draft is labelled `FORWARDED - your
+   instruction, not advice`. Nothing here is financial advice.
 6. **Keys stay on the backend.** The plugin never holds API keys. It only knows the backend URL
    and a pairing code, and the dev pairing code is stripped from production builds.
+7. **Dry run by default.** With `DRY_RUN=true`, orders are really signed (a test proves the
+   signature recovers for testnet) but never sent.
 
-All six rules are enforced in code as of Day 2: `config.py` (testnet guard, key validation),
-`trading.py` (reduce-only closes only), `actions.py` (two-tap confirm) and `hud.ts` (numbers
-only). Tests cover each one (`backend/tests/test_actions.py`, `test_trading.py`, `test_app.py`).
+All seven rules are enforced in code:
+- `config.py`: testnet guard, key validation.
+- `exchanges/hyperliquid.py`: `assert_testnet` before every signature, dry run.
+- `orders.py` and `policy.py`: one path, the guard.
+- `actions.py`: two-tap confirm.
+- `hud.ts`: numbers only.
+
+Tests cover each one (`backend/tests/test_policy.py`, `test_actions.py`, `test_stop_loss.py`,
+`test_trading.py`, `test_dry_run.py`, `test_app.py`).
 
 ## Privacy
 
@@ -205,8 +292,14 @@ only). Tests cover each one (`backend/tests/test_actions.py`, `test_trading.py`,
   choose which chats the bot can see. Disconnecting removes its access.
 - **No message retention.** Message text is never written to the database or the logs. The bot
   records metadata only: connection id, chat id, message id and length. The SQLite schema has no
-  column for message text, and a test enforces that. Logs also redact the pairing code and the
-  bot token.
+  column for message text, and a test enforces that. Logs also redact the pairing code, the bot
+  token and an OpenRouter key.
+- **The HUD's `TG 1 new` line** keeps only the first 30 characters of a message, only in
+  memory, only for 10 minutes. Forwarded drafts are parsed in memory and only metadata is logged.
+- **Reply drafts** send OpenRouter only the trade facts ("closed half of my ETH long at about
+  1,684.9"), never your chat's messages, names or ids. Without a key, nothing is sent anywhere.
+- **Only the owner** (`TELEGRAM_OWNER_ID`) can see `/status`, change the kill switch or threshold,
+  forward drafts, or receive alert DMs.
 
 ## What existed before Nov 23
 

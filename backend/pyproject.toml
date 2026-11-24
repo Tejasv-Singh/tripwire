@@ -8,9 +8,12 @@ dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",
     "pydantic-settings>=2.6",
-    # Pinned exactly: the adapter depends on this SDK's WebsocketManager internals.
+    # Pinned exactly: exchanges/hyperliquid.py builds and signs actions with this SDK's
+    # signing helpers (wire format), and the testnet URL comes from its constants.
     "hyperliquid-python-sdk==0.24.0",
     "python-telegram-bot>=21.6",
+    "httpx>=0.28",
+    "eth-account>=0.13",
 ]
 
 [dependency-groups]
