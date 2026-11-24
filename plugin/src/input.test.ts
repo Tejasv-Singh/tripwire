@@ -27,13 +27,19 @@ describe('commandFromEvent', () => {
     expect(commandFromEvent(both, 'hud')).toEqual({ kind: 'exit' })
   })
 
-  it('double tap backs out of menu / confirm / result instead of exiting', () => {
-    for (const mode of ['menu', 'confirm', 'sending', 'result', 'reply'] as const) {
-      expect(commandFromEvent(sys(OsEventTypeList.DOUBLE_CLICK_EVENT), mode)).toEqual({
+  it('double tap backs out of menu / confirm / result / reply, and asks to end on the HUD', () => {
+    for (const mode of ['hud', 'menu', 'confirm', 'sending', 'result', 'reply'] as const) {
+      expect(commandFromEvent(sys(OsEventTypeList.DOUBLE_CLICK_EVENT), mode, true)).toEqual({
         kind: 'intent',
         action: 'back',
       })
     }
+  })
+
+  it('double tap exits when offline, and on the end-session and summary screens', () => {
+    expect(commandFromEvent(sys(OsEventTypeList.DOUBLE_CLICK_EVENT), 'menu', false)).toEqual({ kind: 'exit' })
+    expect(commandFromEvent(sys(OsEventTypeList.DOUBLE_CLICK_EVENT), 'end', true)).toEqual({ kind: 'exit' })
+    expect(commandFromEvent(sys(OsEventTypeList.DOUBLE_CLICK_EVENT), 'summary', true)).toEqual({ kind: 'exit' })
   })
 
   it('swipes stay next/prev on every screen (the backend decides what they mean)', () => {

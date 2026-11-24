@@ -94,7 +94,7 @@ const unsubscribe = bridge.onEvenHubEvent((event) => {
   }
   // the backend's screen decides what a double tap means (exit on the HUD, back elsewhere);
   // with the link down it is always the HUD, so the user can always leave
-  const cmd = commandFromEvent(event, currentMode(frame, linkView))
+  const cmd = commandFromEvent(event, currentMode(frame, linkView), linkView.kind === 'open')
   if (!cmd || !link) return
   switch (cmd.kind) {
     case 'voice-start':

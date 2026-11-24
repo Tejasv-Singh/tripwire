@@ -1380,3 +1380,63 @@ a virtual mic; the long-press, mic and streaming path still runs.
     outside push-to-talk ignored; voice off; unknown speech; status; the 8 s cut.
 - Plugin: **44 tests** (+7): the `PushToTalk` lifecycle, the tap guard, auto-stop,
   offline / no mic, reset, the long-press mapping, MIC header lines.
+
+### 25. Session summary (screen 6), journal post, /summary (item 3)
+
+**What a session is:** it starts when the backend starts, and again right after one is ended.
+**`session.py`:**
+
+| Number | Source |
+|---|---|
+| trades | every order result that changed something (`filled` / `resting` / `placed`); dry-run signatures counted separately ("+N dry run") |
+| realized P&L | `adapter.realized_pnl_since(session_start)` = Σ(closedPnl − fee) of fills since the start, refreshed every 30 s and when the session ends. **New on the adapter interface.** Hyperliquid uses `userFillsByTime` for the own account, **or in WATCH mode for the watched one** (fills are public). The fake keeps a timestamped log. The Bybit stub returns 0 |
+| unrealized | Σ uPnL of the positions open now |
+| session P&L | realized + (unrealized now − unrealized at the start). Only what changed **during** the session, so a WATCH position opened last week doesn't count |
+| max drawdown | the largest peak-to-trough fall of the session-P&L curve, sampled every 5 s and after every result |
+| alerts | fired (`AlertService.on_fire`), acted (an order sent from an alert screen, via the alert's SL submenu included: `Outcome.extra["via_alert"]`), snoozed |
+| policy blocks | arm-time pre-check blocks, submit blocks, blocked forwarded drafts, WATCH refusals (`Outcome.blocked`) |
+
+`realized_pnl_today()` (the policy's daily loss lock) still looks **only** at the own account,
+never at a watched one (tested).
+
+**Screens (`ActionFlow` modes `end` and `summary`):**
+
+| Screen | Tap | Swipe | 2x |
+|---|---|---|---|
+| HUD | menu | next / prev | **End session?** (was: exit) |
+| `END SESSION?  14:02-now (1h28m)` / `Trades 2  Session P&L +$9.30` / `Max drawdown -$18.20` (live) | end it → summary | back to the HUD | exit the app |
+| `SESSION 14:02-15:30 (1h28m)` / trades + realized / uPnL now + session / drawdown + blocks / alerts / mode, or `Posted to journal` / `Not posted: <why>` | **post to the journal** | HUD | exit the app |
+
+- **You can still always get out with two double taps** (HUD → End session? → exit).
+- With the link down, one double tap exits, as before.
+- `commandFromEvent(event, mode, online)` now knows whether the link is open.
+- New HUD footer: `tap: menu  swipe: next  hold: talk  2x: end`.
+
+**Journal channel:**
+- `JOURNAL_CHAT_ID` (a channel or group; the bot must be an **admin**).
+- `TelegramBot.send_to_chat` posts the text summary: span, mode, trades with times (marked
+  "from alert"), realized / unrealized / session P&L, drawdown, alerts, blocks, and "Numbers only
+  - not advice."
+- **Setup helper:** when the bot is added to a channel or group (`my_chat_member`, now in
+  `ALLOWED_UPDATES`), it DMs the owner the chat id and the exact `JOURNAL_CHAT_ID=...` line, and
+  says if it still needs admin rights.
+- **`/summary`** (owner only) answers with the running session so far.
+- Every ended session is also stored in a new SQLite `sessions` table (summary JSON, numbers
+  only).
+- `/healthz → session` shows the live numbers.
+
+**Demo backend:** `send_to_chat` is replaced by a send-only call with the real token (no
+polling, so no conflict with the real backend). Posts are visible at `GET /demo/journal`.
+
+**Checks:**
+- **392 backend tests pass** (+10, new `test_session.py`):
+  - Counting, the session-P&L and drawdown maths (peak +20 → trough −50 = −70, unaffected by a
+    +$500 position at the start), ending starts a fresh session.
+  - The exact journal text; the screens; `/summary` owner-only.
+  - The channel-id DM (admin vs member); WATCH realized P&L uses the watched address.
+  - **End to end:** a Close 50 % fill → HUD 2x → `End session?` (live: 1 trade) → tap → the
+    summary (realized +$20.60) → tap → posted to chat -1001; the session is stored in SQLite and
+    a fresh session runs.
+  - Without `JOURNAL_CHAT_ID`, the screen says why.
+- Plugin: **46 tests**: End / summary rendering, double tap → back online / exit offline / exit
+  on end and summary, the new footers.

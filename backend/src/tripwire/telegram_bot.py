@@ -9,6 +9,10 @@ Day 1 behaviour:
   business_message          -> log metadata ONLY (ids, length) — text is never logged or stored;
                                the first 30 characters go to the in-memory Inbox for the HUD line
   /status                   -> owner only: positions + uPnL, trading mode, kill switch, alerts
+  /summary                  -> owner only: the current session so far (session.py)
+  my_chat_member            -> when the bot is added to a channel / group, DM the owner its id
+                               (that is the JOURNAL_CHAT_ID to put in .env)
+  send_to_chat(id, text)    -> the end-of-session journal post (bot must be admin of a channel)
   forwarded / typed text    -> owner only: parse into an order draft (drafts.py), run the policy
                                guard, show it on the glasses for the two-tap confirm
 
@@ -24,6 +28,7 @@ blocks or crashes the backend:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import warnings
 from collections.abc import Awaitable, Callable
@@ -36,6 +41,7 @@ from telegram.error import InvalidToken, RetryAfter, TelegramError
 from telegram.ext import (
     Application,
     BusinessConnectionHandler,
+    ChatMemberHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -64,6 +70,7 @@ ALLOWED_UPDATES = [
     Update.BUSINESS_MESSAGE,
     Update.EDITED_BUSINESS_MESSAGE,
     Update.DELETED_BUSINESS_MESSAGES,
+    Update.MY_CHAT_MEMBER,  # added to a channel -> tell the owner its id (journal setup)
 ]
 
 START_TEXT = (
@@ -92,6 +99,8 @@ class BotServices:
     default_leverage: float = 1.0
     inbox: Inbox | None = None  # business messages -> HUD line (memory only)
     status_text: Callable[[], str] | None = None  # /status
+    summary_text: Callable[[], str] | None = None  # /summary
+    journal_chat_id: int | None = None
 
 
 def is_owner(update: Update, services: BotServices | None) -> bool:
@@ -261,6 +270,48 @@ def make_business_message_handler(services: BotServices | None) -> MessageHandle
     return MessageHandler(filters.UpdateType.BUSINESS_MESSAGES, on_business_message)
 
 
+def make_summary_handler(services: BotServices | None) -> CommandHandler[Any, None]:
+    async def on_summary(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        msg = update.effective_message
+        if msg is None:
+            return
+        if not is_owner(update, services) or services is None or services.summary_text is None:
+            await msg.reply_text("Not authorized.")
+            return
+        await msg.reply_text(services.summary_text())
+
+    return CommandHandler("summary", on_summary, filters=filters.UpdateType.MESSAGE)
+
+
+def make_member_handler(services: BotServices | None) -> ChatMemberHandler[Any, None]:
+    """Added to a channel / group: tell the owner its id (for JOURNAL_CHAT_ID). Ids only."""
+
+    async def on_my_chat_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+        change = update.my_chat_member
+        if change is None or services is None or not services.owner_id:
+            return
+        chat, status = change.chat, change.new_chat_member.status
+        log.info("bot membership in chat %s (%s): %s", chat.id, chat.type, status)
+        if status not in ("administrator", "member") or chat.type == "private":
+            return
+        admin = status == "administrator"
+        hint = "" if admin else " Make me an ADMIN there so I can post the session journal."
+        current = (
+            " (this is the JOURNAL_CHAT_ID already set)"
+            if chat.id == services.journal_chat_id
+            else ""
+        )
+        with contextlib.suppress(TelegramError):
+            await ctx.bot.send_message(
+                chat_id=services.owner_id,
+                text=f"I was added to {chat.type} '{chat.title}' as {status}. Its id is {chat.id}"
+                f"{current}. For session journals put JOURNAL_CHAT_ID={chat.id} in .env and "
+                f"restart.{hint}",
+            )
+
+    return ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER)
+
+
 def make_status_handler(services: BotServices | None) -> CommandHandler[Any, None]:
     async def on_status(update: Update, _ctx: ContextTypes.DEFAULT_TYPE) -> None:
         msg = update.effective_message
@@ -355,6 +406,8 @@ def build_application(
     app.add_handler(make_business_connection_handler(store))
     app.add_handler(make_business_message_handler(services))
     app.add_handler(make_status_handler(services))
+    app.add_handler(make_summary_handler(services))
+    app.add_handler(make_member_handler(services))
     app.add_handler(make_draft_handler(services))
     return app
 
@@ -457,6 +510,17 @@ class TelegramBot:
             log.warning("Telegram DM to owner failed: %s: %s", type(exc).__name__, exc)
             return False
         return True
+
+    async def send_to_chat(self, chat_id: int, text: str) -> tuple[bool, str]:
+        """Post to a channel / group (the session journal). (ok, short reason)."""
+        if self.status != "running" or self._app is None:
+            return False, "Telegram bot not running"
+        try:
+            await self._app.bot.send_message(chat_id=chat_id, text=text)
+        except TelegramError as exc:
+            log.warning("journal post failed: %s: %s", type(exc).__name__, exc)
+            return False, f"{type(exc).__name__}: {exc}"[:80]
+        return True, "posted to the journal"
 
     async def send_business_reply(self, connection_id: str, chat_id: int, text: str) -> bool:
         """Answer in a business chat AS the user (needs the "reply to messages" right)."""

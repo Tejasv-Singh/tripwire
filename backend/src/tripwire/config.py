@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     # Your own numeric Telegram user id: only this user may use /kill, /status, forwarded order
     # drafts, and receives alert DMs. The bot's /start reply tells you the number.
     telegram_owner_id: int | None = None
+    # Your own journal channel (or group) for end-of-session summaries; the bot must be an admin
+    # there. Add the bot to the channel and it DMs you this id. Empty = no journal posts.
+    journal_chat_id: int | None = None
 
     # DRY_RUN (default ON): orders are built and SIGNED exactly like live ones (with HL_AGENT_KEY,
     # or a throwaway key generated at startup if it is empty) and logged, never POSTed.
@@ -121,7 +124,7 @@ class Settings(BaseSettings):
             raise ValueError(f"PAIRING_CODE must be at least {MIN_PAIRING_CODE_LEN} characters")
         return SecretStr(v.get_secret_value().strip())
 
-    @field_validator("telegram_owner_id", mode="before")
+    @field_validator("telegram_owner_id", "journal_chat_id", mode="before")
     @classmethod
     def _empty_owner_is_none(cls, v: object) -> object:
         return None if isinstance(v, str) and not v.strip() else v

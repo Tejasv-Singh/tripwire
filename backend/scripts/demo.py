@@ -101,9 +101,35 @@ def build(args: argparse.Namespace) -> FastAPI:
     app = create_app(
         settings, run_bot=False, make_adapter=make_adapter, audio_override=audio_override
     )
-    notifier = DemoNotifier(real.telegram_bot_token.get_secret_value(), real.telegram_owner_id)
+    token = real.telegram_bot_token.get_secret_value()
+    notifier = DemoNotifier(token, real.telegram_owner_id)
     app.state.alerts.notifier = notifier
     services = app.state.bot_services
+    journal: list[dict[str, Any]] = []
+
+    async def send_to_chat(chat_id: int, text: str) -> tuple[bool, str]:
+        """Journal post without polling: one sendMessage with the real bot token."""
+        if not token:
+            journal.append({"chat_id": chat_id, "text": text, "delivered": False})
+            return False, "no TELEGRAM_BOT_TOKEN"
+        from telegram import Bot
+
+        try:
+            async with Bot(token) as bot:
+                await bot.send_message(chat_id=chat_id, text=text)
+        except Exception as exc:
+            journal.append({"chat_id": chat_id, "text": text, "delivered": False})
+            return False, f"{type(exc).__name__}: {exc}"[:80]
+        journal.append({"chat_id": chat_id, "text": text, "delivered": True})
+        log.warning("JOURNAL posted to %s", chat_id)
+        return True, "posted to the journal"
+
+    app.state.bot.send_to_chat = send_to_chat
+
+    @app.get("/demo/journal")
+    async def journal_posts(request: Request) -> list[dict[str, Any]]:
+        local_only(request)
+        return journal
 
     def local_only(request: Request) -> None:
         if request.client is None or request.client.host not in ("127.0.0.1", "::1"):

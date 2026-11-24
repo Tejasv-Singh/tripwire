@@ -4,7 +4,10 @@
 // The G2 font is proportional, so column padding is approximate on the real display.
 
 import type {
+  EndScreen,
   HudFrame,
+  SessionSummaryInfo,
+  SummaryScreen,
   MenuScreen,
   OrderScreen,
   Position,
@@ -22,14 +25,16 @@ export const RISK_GLYPH = '▲' // "▲"
 const BODY_LINES = MAX_LINES - 3 // header + separator + footer are always shown
 const SEPARATOR = '-'.repeat(40)
 export const FOOTERS: Record<UiMode | 'link' | 'watch', string> = {
-  hud: 'tap: actions  swipe: next  2x: exit',
+  hud: 'tap: menu  swipe: next  hold: talk  2x: end',
   menu: 'tap: select  swipe: move  2x: back',
   confirm: 'tap: SEND  swipe/2x: cancel',
   sending: 'sending... please wait',
   result: 'tap/swipe/2x: back to HUD',
   reply: 'tap: send reply  2x: skip',
+  end: 'tap: end + summary  swipe: back  2x: exit',
+  summary: 'tap: post to journal  swipe: HUD  2x: exit',
   link: 'tap: actions  swipe: next  2x: exit',
-  watch: 'watch only  swipe: next  2x: exit', // WATCH_ADDRESS: the menu is disabled
+  watch: 'watch only  swipe: next  hold: talk  2x: end', // WATCH_ADDRESS: no trading menu
 }
 
 export type LinkView =
@@ -272,6 +277,46 @@ function replyLines(ui: ReplyScreen): string[] {
   return [...done, `REPLY to ${ui.to} on Telegram?`, ...wrap(`"${ui.text}"`, MAX_COLS).slice(0, 2), by]
 }
 
+// --- session (screen 6) --------------------------------------------------------------------------
+
+function hhmm(ms: number): string {
+  return fmtClock(new Date(ms))
+}
+
+export function fmtDuration(s: number): string {
+  const m = Math.floor(s / 60)
+  return `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}m`
+}
+
+function sessionSpan(s: SessionSummaryInfo): string {
+  return `${hhmm(s.started_ms)}-${s.ended_ms ? hhmm(s.ended_ms) : 'now'} (${fmtDuration(s.duration_s)})`
+}
+
+function endLines(ui: EndScreen): string[] {
+  const s = ui.summary
+  if (!s) return ['END SESSION?']
+  return [
+    `END SESSION?  ${sessionSpan(s)}`,
+    `Trades ${s.trades}  Session P&L ${fmtUsd(s.session_pnl)}`,
+    `Max drawdown ${fmtUsd(s.max_drawdown)}`,
+  ]
+}
+
+function summaryLines(ui: SummaryScreen): string[] {
+  const s = ui.summary
+  const trades = `Trades ${s.trades}${s.dry_runs ? ` (+${s.dry_runs} dry)` : ''}`
+  const last =
+    ui.posted === true ? 'Posted to journal' : ui.posted === false ? `Not posted: ${ui.note ?? ''}` : s.mode
+  return [
+    `SESSION ${sessionSpan(s)}`,
+    `${trades}  Realized ${fmtUsd(s.realized)}`,
+    `uPnL now ${fmtUsd(s.unrealized)}  Session ${fmtUsd(s.session_pnl)}`,
+    `Max drawdown ${fmtUsd(s.max_drawdown)}  Blocks ${s.policy_blocks}`,
+    `Alerts ${s.alerts_fired} fired ${s.alerts_acted} acted ${s.alerts_snoozed} snoozed`,
+    last,
+  ]
+}
+
 function screenLines(f: HudFrame): string[] {
   const ui = f.ui ?? { mode: 'hud' }
   switch (ui.mode) {
@@ -285,6 +330,10 @@ function screenLines(f: HudFrame): string[] {
       return resultLines(ui)
     case 'reply':
       return replyLines(ui)
+    case 'end':
+      return endLines(ui)
+    case 'summary':
+      return summaryLines(ui)
     case 'hud': {
       const lines = f.position ? positionLines(f.position, f.view.index, f.view.count) : referenceLines(f)
       const tg = inboxLine(f)

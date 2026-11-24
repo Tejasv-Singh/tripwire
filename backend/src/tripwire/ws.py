@@ -155,6 +155,8 @@ def make_ws_router(
     voice: VoiceEngine | None = None,
     status_line: Callable[[], str] | None = None,
     audio_override: Callable[[], bytes | None] | None = None,  # demo only: substitute speech
+    sessions: Any = None,  # session.SessionService (screen 6)
+    post_journal: Callable[[str], Awaitable[tuple[bool, str]]] | None = None,
     min_interval_s: float = MIN_INTERVAL_S,
     heartbeat_s: float = HEARTBEAT_S,
 ) -> APIRouter:
@@ -271,7 +273,25 @@ def make_ws_router(
             with contextlib.suppress(Exception):
                 await send(ws, session, {"type": "reply", "ok": ok, "to": offer.target.name})
 
-    async def run_order(ws: WebSocket, session: ClientSession, req: Order) -> None:
+    async def end_session(session: ClientSession) -> None:
+        summary = await sessions.end()
+        session.flow.show_summary(summary.to_ui(), summary.text())
+        session.wake()
+
+    async def post_summary(session: ClientSession) -> None:
+        if post_journal is None:
+            ok, note = False, "journal not configured"
+        else:
+            try:
+                ok, note = await post_journal(session.flow.summary_text)
+            except Exception as exc:
+                ok, note = False, f"{type(exc).__name__}: {exc}"[:60]
+        if session.flow.set_post_result(ok, note):
+            session.wake()
+
+    async def run_order(
+        ws: WebSocket, session: ClientSession, req: Order, via_alert: bool = False
+    ) -> None:
         try:
             result = await orders.submit(  # policy guard, then the exchange
                 req, position=live_position(req.coin), mark=ref_price(req.coin), send=send_order
@@ -284,6 +304,9 @@ def make_ws_router(
             schedule(session, out.timer_s, out.token)
         if result.ok and result.status in ("filled", "placed"):  # a real change, not a dry run
             spawn(session, offer_reply(session, req, result, out.token), "reply-draft")
+        if sessions is not None:
+            sessions.tracker.record_order(req, result, via_alert=via_alert)
+            sessions.tracker.sample(sessions.unrealized_now())
         fraction = req.fraction if req.kind == "close" else None
         size = req.size if req.kind == "close" else None
         log.info("order %s %s from %s -> %s", req.kind, req.coin, session.client, result.status)
@@ -335,11 +358,14 @@ def make_ws_router(
                 await asyncio.sleep(delay)  # coalesce bursts: latest state wins
             session.dirty.clear()
             session.seq += 1
+            ui = session.flow.ui(loop.time(), trading=trading_on())
+            if ui.get("mode") == "end" and sessions is not None:
+                ui["summary"] = sessions.snapshot().to_ui()  # live numbers for "End session?"
             frame = build_hud_frame(
                 state,
                 index=session.index,
                 seq=session.seq,
-                ui=session.flow.ui(loop.time(), trading=trading_on()),
+                ui=ui,
                 lock_coin=session.flow.coin,
                 trading=trading_info(),
                 inbox=inbox.summary() if inbox is not None else None,
@@ -364,10 +390,16 @@ def make_ws_router(
         """Side effects an ActionFlow Outcome asks for (shared by taps, voice, pending voice)."""
         if out.timer_s is not None:
             schedule(session, out.timer_s, out.token)
-        if out.execute is not None and ws is not None:
-            spawn(session, run_order(ws, session, out.execute), "order")
-        elif out.execute is not None:
-            spawn(session, run_order(session_ws[session], session, out.execute), "order")
+        if out.execute is not None:
+            target = ws if ws is not None else session_ws[session]
+            via = bool(out.extra.get("via_alert"))
+            spawn(session, run_order(target, session, out.execute, via), "order")
+        if out.blocked and sessions is not None:
+            sessions.tracker.record_block()
+        if out.end_session and sessions is not None:
+            spawn(session, end_session(session), "end-session")
+        if out.post_summary:
+            spawn(session, post_summary(session), "journal")
         if out.fetch_stop is not None:
             spawn(session, load_stop(session, out.fetch_stop), "stop-lookup")
         if out.snooze is not None and on_snooze is not None:

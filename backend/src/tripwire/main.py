@@ -27,6 +27,7 @@ from tripwire.orders import OrderService
 from tripwire.policy import Decision, KillSwitch, PolicyGuard, PolicyLimits
 from tripwire.replies import ReplyDrafter
 from tripwire.risk import AlertService, RiskEngine
+from tripwire.session import SessionService
 from tripwire.state import MarketState
 from tripwire.telegram_bot import BotServices, TelegramBot, build_application
 from tripwire.voice import VoiceEngine
@@ -202,6 +203,30 @@ def create_app(
     )
     bot_services.alerts = alerts
 
+    def session_mode() -> str:
+        base = {
+            "account": "own account",
+            "watch": f"WATCH {state.account_short} (read-only)",
+            "price": "price only",
+        }[state.mode]
+        if adapter.name == "fake":
+            return base + ", DEMO exchange"
+        if adapter.can_trade and adapter.dry_run:
+            return base + ", DRY RUN"
+        return base
+
+    sessions = SessionService(state, adapter, store=store, mode=session_mode)
+    alerts.on_fire = lambda _alert: sessions.tracker.record_alert()
+
+    def on_snooze(coin: str, side: str, now: float) -> None:
+        alerts.engine.snooze(coin, side, now)
+        sessions.tracker.record_snooze()
+
+    async def post_journal(text: str) -> tuple[bool, str]:
+        if settings.journal_chat_id is None:
+            return False, "JOURNAL_CHAT_ID not set in .env"
+        return await bot.send_to_chat(settings.journal_chat_id, text)
+
     def known_coins() -> set[str] | None:
         """Perp names from allMids (spot pairs look like "@107" / "PURR/USDC"). None until the
         full list has arrived, so the parser doesn't reject coins it simply hasn't seen yet."""
@@ -214,6 +239,8 @@ def create_app(
         return guard.check(draft.to_order(), position=p, mark=mark)
 
     def push_draft(draft: OrderDraft, decision: Decision) -> int:
+        if not decision.allowed:
+            sessions.tracker.record_block()
         return hub.push_draft(draft, decision, asyncio.get_running_loop().time())
 
     inbox = Inbox(on_change=hub.wake_all)
@@ -235,6 +262,8 @@ def create_app(
 
     bot_services.inbox = inbox
     bot_services.status_text = status_text
+    bot_services.summary_text = lambda: sessions.snapshot().text()
+    bot_services.journal_chat_id = settings.journal_chat_id
     bot_services.known_coins = known_coins
     bot_services.check_draft = check_draft
     bot_services.push_draft = push_draft
@@ -251,6 +280,7 @@ def create_app(
         feed_task = asyncio.create_task(feed.run(), name="hl-feed") if feed else None
         alert_task = asyncio.create_task(alerts.run(), name="risk-alerts")
         voice_task = asyncio.create_task(voice.warm_up(), name="voice-warm-up")
+        session_task = asyncio.create_task(sessions.run(), name="session-sampling")
         warm_task = asyncio.create_task(adapter.start(), name="exchange-warm-up")
         await bot.start()
         log.info(
@@ -267,9 +297,10 @@ def create_app(
         try:
             yield
         finally:
-            for task in (warm_task, alert_task, voice_task):
+            tasks = (warm_task, alert_task, voice_task, session_task)
+            for task in tasks:
                 task.cancel()
-            await asyncio.gather(warm_task, alert_task, voice_task, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
             await bot.stop()
             if feed_task:
                 feed_task.cancel()
@@ -292,13 +323,15 @@ def create_app(
             hub=hub,
             guard=guard,
             orders=orders,
-            on_snooze=alerts.engine.snooze,
+            on_snooze=on_snooze,
             inbox=inbox,
             replier=replier,
             send_reply=send_reply,
             voice=voice,
             status_line=lambda: status_line(state, adapter, guard),
             audio_override=audio_override,
+            sessions=sessions,
+            post_journal=post_journal,
             min_interval_s=min_interval_s,
             heartbeat_s=heartbeat_s,
         )
@@ -329,6 +362,7 @@ def create_app(
             },
             "policy": guard.status(),
             "voice": {"status": voice.status, "detail": voice.detail},
+            "session": sessions.snapshot().to_ui(),
             "alerts": {
                 **alerts.engine.status(asyncio.get_running_loop().time()),
                 "last": alerts.last_delivery,
@@ -346,6 +380,8 @@ def create_app(
     app.state.bot_services = bot_services
     app.state.inbox = inbox
     app.state.voice = voice
+    app.state.sessions = sessions
+    app.state.bot = bot
     app.state.replier = replier
     app.state.kill_switch = kill_switch
     return app

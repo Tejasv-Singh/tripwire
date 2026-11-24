@@ -7,7 +7,7 @@ export type Side = 'LONG' | 'SHORT'
 export type MarkSource = 'markPx' | 'mid'
 /** v2: tap/back replace v1's "actions". The backend decides what a tap means on each screen. */
 export type IntentAction = 'next' | 'prev' | 'tap' | 'back'
-export type UiMode = 'hud' | 'menu' | 'confirm' | 'sending' | 'result' | 'reply'
+export type UiMode = 'hud' | 'menu' | 'confirm' | 'sending' | 'result' | 'reply' | 'end' | 'summary'
 export type TradingStatus = 'off' | 'warming' | 'ready' | 'error'
 /** blocked = refused by the policy guard; dry_run = signed and logged, not sent */
 export type ResultStatus = 'filled' | 'resting' | 'placed' | 'rejected' | 'error' | 'blocked' | 'dry_run'
@@ -145,8 +145,49 @@ export interface ReplyScreen {
   result_message?: string
 }
 
+/** Trading session numbers (backend session.py). */
+export interface SessionSummaryInfo {
+  started_ms: number
+  ended_ms: number | null // null = still running (the "End session?" screen)
+  duration_s: number
+  mode: string
+  trades: number
+  dry_runs: number
+  realized: number
+  unrealized: number
+  session_pnl: number
+  max_drawdown: number
+  alerts_fired: number
+  alerts_acted: number
+  alerts_snoozed: number
+  policy_blocks: number
+}
+
+/** Double tap on the HUD: "End session?" with the live numbers. */
+export interface EndScreen {
+  mode: 'end'
+  coin: string | null
+  summary?: SessionSummaryInfo
+}
+
+/** The ended session; a tap posts it to the journal channel. */
+export interface SummaryScreen {
+  mode: 'summary'
+  coin: string | null
+  summary: SessionSummaryInfo
+  posted: boolean | null
+  note: string | null
+}
+
 /** Which screen the backend's ActionFlow is on for this client (actions.py). */
-export type UiState = { mode: 'hud' } | MenuScreen | OrderScreen | ResultScreen | ReplyScreen
+export type UiState =
+  | { mode: 'hud' }
+  | MenuScreen
+  | OrderScreen
+  | ResultScreen
+  | ReplyScreen
+  | EndScreen
+  | SummaryScreen
 
 /** Telegram Business messages of the last 10 minutes (first 30 chars, backend memory only). */
 export interface InboxSummary {

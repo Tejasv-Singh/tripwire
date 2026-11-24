@@ -226,9 +226,19 @@ class HyperliquidAdapter:
 
     async def realized_pnl_today(self) -> float:
         if not self.account or self.watch:
+            return 0.0  # the daily loss lock is about YOUR account only
+        return await self._realized(self.account, utc_day_start_ms())
+
+    async def realized_pnl_since(self, start_ms: int) -> float:
+        """Session P&L: the own account, or in WATCH mode the watched one (fills are public)."""
+        address = self.account or (self.state.account if self.state.watch else "")
+        if not address:
             return 0.0
+        return await self._realized(address, start_ms)
+
+    async def _realized(self, address: str, start_ms: int) -> float:
         info = await self._get_info()
-        fills = await asyncio.to_thread(info.user_fills_by_time, self.account, utc_day_start_ms())
+        fills = await asyncio.to_thread(info.user_fills_by_time, address, start_ms)
         total = 0.0
         for f in fills if isinstance(fills, list) else []:
             total += (to_float(f.get("closedPnl")) or 0.0) - (to_float(f.get("fee")) or 0.0)

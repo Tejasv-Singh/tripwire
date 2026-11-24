@@ -33,13 +33,15 @@ function eventTypeOf(envelope?: { eventType?: OsEventTypeList }): OsEventTypeLis
 }
 
 /**
- * `mode` is the screen the backend says we are on (hud frame `ui.mode`). Pass 'hud' whenever the
- * link is not open, so a double tap can always exit even if the last frame showed a menu.
+ * `mode` is the screen the backend says we are on (hud frame `ui.mode`); `online` = the link is
+ * open. A double tap EXITS when offline, and on the "End session?" and summary screens; on the
+ * HUD (online) it asks the backend for "End session?"; anywhere else it backs out. So two double
+ * taps always leave the app.
  *   tap        -> 'tap'  (backend: open menu / pick item / CONFIRM on the confirm screen)
  *   swipe      -> 'next' / 'prev'  (backend: change position / move cursor / cancel)
  *   double tap -> HUD: exit the app;  any other screen: 'back' (cancel, return to the HUD)
  */
-export function commandFromEvent(event: EvenHubEvent, mode: UiMode = 'hud'): Command | null {
+export function commandFromEvent(event: EvenHubEvent, mode: UiMode = 'hud', online = false): Command | null {
   // Taps/swipes come via textEvent (our container captures events) or sysEvent (ring, lifecycle).
   const types = [eventTypeOf(event.sysEvent), eventTypeOf(event.textEvent)]
   const has = (t: OsEventTypeList) => types.includes(t)
@@ -47,7 +49,8 @@ export function commandFromEvent(event: EvenHubEvent, mode: UiMode = 'hud'): Com
   // Double tap first (before CLICK): on the HUD it always exits; elsewhere it always backs out,
   // so two double taps leave the app from any screen.
   if (has(OsEventTypeList.DOUBLE_CLICK_EVENT)) {
-    return mode === 'hud' ? { kind: 'exit' } : { kind: 'intent', action: 'back' }
+    if (!online || mode === 'end' || mode === 'summary') return { kind: 'exit' }
+    return { kind: 'intent', action: 'back' }
   }
   if (has(OsEventTypeList.SYSTEM_EXIT_EVENT) || has(OsEventTypeList.ABNORMAL_EXIT_EVENT)) {
     return { kind: 'shutdown' }

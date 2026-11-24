@@ -135,8 +135,10 @@ class AlertService:
         notifier: Notifier | None,
         store: Store | None = None,
         clock: Callable[[], float] | None = None,
+        on_fire: Callable[[Alert], None] | None = None,  # session summary counts alerts
     ) -> None:
         self.engine = engine
+        self.on_fire = on_fire
         self.adapter = adapter
         self.glasses = glasses
         self.notifier = notifier
@@ -164,6 +166,8 @@ class AlertService:
         log.info("alert threshold set to %g%% (re-armed)", pct)
 
     async def deliver(self, alert: Alert) -> str:
+        if self.on_fire is not None:
+            self.on_fire(alert)
         shown = self.glasses(alert)
         if shown:
             where = f"glasses ({shown})"

@@ -59,7 +59,7 @@ describe('renderHud', () => {
       'uPnL +$41.20 (+2.4%)  ROE +12.1%',
       'Liq 2,980  12.7% away',
       '----------------------------------------',
-      'tap: actions  swipe: next  2x: exit',
+      'tap: menu  swipe: next  hold: talk  2x: end',
     ])
   })
 
@@ -71,7 +71,7 @@ describe('renderHud', () => {
     const lines = renderHud({ frame: watched, link: { kind: 'open' }, now: NOW }).split('\n')
     expect(lines[0]).toBe('TRIPWIRE WATCH      TESTNET      09:05')
     expect(lines.at(-1)).toBe(FOOTERS.watch)
-    expect(lines.at(-1)).toBe('watch only  swipe: next  2x: exit')
+    expect(lines.at(-1)).toBe('watch only  swipe: next  hold: talk  2x: end')
     const flat = renderHud({
       frame: frame({ account: true, watch: true, address: '0xb7bd...6422' }), link: { kind: 'open' }, now: NOW,
     })
@@ -288,6 +288,38 @@ describe('action screens', () => {
     expect(down.split('\n')[0]).toBe(headerLine(NOW))
   })
 
+  it('renders End session? with live numbers, and the summary with the journal result', () => {
+    const t0 = new Date(2026, 10, 25, 14, 2).getTime()
+    const summary = {
+      started_ms: t0, ended_ms: null, duration_s: 5280, mode: 'WATCH 0x7149...7bd0 (read-only)',
+      trades: 2, dry_runs: 1, realized: 12.4, unrealized: -3.1, session_pnl: 9.3, max_drawdown: -18.2,
+      alerts_fired: 2, alerts_acted: 1, alerts_snoozed: 1, policy_blocks: 1,
+    }
+    const end = at({ mode: 'end', coin: null, summary }).split('\n')
+    expect(end.slice(1, 4)).toEqual([
+      'END SESSION?  14:02-now (1h28m)',
+      'Trades 2  Session P&L +$9.30',
+      'Max drawdown -$18.20',
+    ])
+    expect(end.at(-1)).toBe(FOOTERS.end)
+    const done = { ...summary, ended_ms: t0 + 5280_000 }
+    const lines = at({ mode: 'summary', coin: null, summary: done, posted: null, note: null }).split('\n')
+    expect(lines.slice(1, 7)).toEqual([
+      'SESSION 14:02-15:30 (1h28m)',
+      'Trades 2 (+1 dry)  Realized +$12.40',
+      'uPnL now -$3.10  Session +$9.30',
+      'Max drawdown -$18.20  Blocks 1',
+      'Alerts 2 fired 1 acted 1 snoozed',
+      'WATCH 0x7149...7bd0 (read-only)',
+    ])
+    expect(lines.at(-1)).toBe('tap: post to journal  swipe: HUD  2x: exit')
+    const posted = at({ mode: 'summary', coin: null, summary: done, posted: true, note: 'posted to the journal' })
+    expect(posted).toContain('Posted to journal')
+    const failed = at({ mode: 'summary', coin: null, summary: done, posted: false, note: 'JOURNAL_CHAT_ID not set in .env' })
+    expect(failed).toContain('Not posted: JOURNAL_CHAT_ID not set in .env')
+    assertFits(failed)
+  })
+
   it('renders the RISK alert screen with its four actions', () => {
     const alert: UiState = {
       mode: 'menu', kind: 'alert', coin: 'ETH', items: ['Move SL', 'Close 50%', 'Close all', 'Snooze 5m'],
@@ -398,7 +430,7 @@ describe('action screens', () => {
     expect(currentMode(frame({ ui: menu }), { kind: 'retrying', inSeconds: 3 })).toBe('hud')
     expect(currentMode(null, { kind: 'open' })).toBe('hud')
     const down = renderHud({ frame: frame({ ui: menu }), link: { kind: 'retrying', inSeconds: 3 }, now: NOW })
-    expect(down.split('\n').at(-1)).toBe(FOOTERS.hud)
+    expect(down.split('\n').at(-1)).toBe(FOOTERS.link) // offline: a double tap exits
   })
 })
 

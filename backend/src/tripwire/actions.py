@@ -23,6 +23,12 @@ Intents: next | prev | tap | back   (plugin: swipe down/up, tap, double tap)
   reply    tap        -> send the drafted reply (caller does it)    back -> skip
            next/prev  -> nothing                                     timer (REPLY_HOLD_S) -> hud
 
+Session (screen 6):
+  hud      back (double tap) -> end      "End session?" with the live numbers
+  end      tap -> caller ends the session and calls show_summary()     next/prev -> hud
+  summary  tap -> caller posts it to the journal channel (set_post_result)   next/prev -> hud
+  (a double tap on end / summary exits the app -- the plugin does that itself)
+
 Voice (voice()): a parsed command ARMS exactly what the matching menu tap would arm -- through
 _select(), so the policy pre-check, WATCH and trading checks are identical -- and the two-tap
 confirm still has to happen. "cancel" leaves any screen; on the reply screen any other speech
@@ -66,7 +72,7 @@ from tripwire.voice_grammar import VoiceCommand
 # blocked order is refused BEFORE the confirm screen. OrderService.submit() checks again.
 Precheck = Callable[[Order], Decision]
 
-Mode = Literal["hud", "menu", "confirm", "sending", "result", "reply"]
+Mode = Literal["hud", "menu", "confirm", "sending", "result", "reply", "end", "summary"]
 MenuKind = Literal["actions", "sl", "alert", "draft"]
 Intent = Literal["next", "prev", "tap", "back"]
 
@@ -151,6 +157,9 @@ class Outcome:
     snooze: tuple[str, str] | None = None  # (coin, side): snooze this alert in the risk engine
     send_reply: ReplyOffer | None = None  # the user tapped "send" on a reply offer
     show_status: bool = False  # voice "status": the caller shows a one-line status
+    blocked: bool = False  # the policy guard (or WATCH) refused something: count it
+    end_session: bool = False  # "End session?" confirmed: caller ends it, then show_summary()
+    post_summary: bool = False  # summary screen tapped: caller posts it to the journal
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -172,6 +181,9 @@ class ActionFlow:
         self.pending_draft: tuple[OrderDraft, Decision] | None = None
         self.reply: ReplyOffer | None = None  # mode "reply"
         self.pending_voice: str | None = None  # SL item key to arm once the stop has loaded
+        self.summary: dict[str, Any] | None = None  # the ended session (mode "summary")
+        self.summary_text = ""  # what a tap posts to the journal
+        self.posted: bool | None = None  # None = not tried, True / False = journal result
         self.token = 0  # bumped on every transition; stale timers compare and do nothing
 
     # --- transitions -------------------------------------------------------------------------
@@ -191,6 +203,7 @@ class ActionFlow:
             self.kind, self.parent, self.stop, self.alert = "actions", "actions", None, None
             self.draft, self.draft_decision, self.reply = None, None, None
             self.pending_voice = None
+            self.summary, self.summary_text, self.posted = None, "", None
         if mode == "menu":
             self.armed, self.result = None, None
         return self.token
@@ -277,7 +290,22 @@ class ActionFlow:
                     return Outcome(ok=False, note="no open position")
                 self.coin = position.coin
                 return self._open_menu("actions")
-            return Outcome(note="already on the HUD")
+            self._go("end")  # back = double tap on the HUD
+            return Outcome(note="end session? tap to end, swipe to keep going")
+
+        if self.mode == "end":
+            if intent == "tap":
+                return Outcome(end_session=True)
+            self._go("hud")
+            return Outcome(note="session continues")
+
+        if self.mode == "summary":
+            if intent == "tap":
+                if self.posted:
+                    return Outcome(note="already posted")
+                return Outcome(post_summary=True, note="posting to the journal")
+            self._go("hud")
+            return Outcome()
 
         if self.mode == "menu":
             if intent in ("next", "prev"):
@@ -323,6 +351,17 @@ class ActionFlow:
         # result
         self._go("hud")
         return Outcome()
+
+    def show_summary(self, summary: dict[str, Any], text: str) -> None:
+        """The session just ended: show its summary (a new session is already running)."""
+        self._go("summary")
+        self.summary, self.summary_text, self.posted = summary, text, None
+
+    def set_post_result(self, ok: bool, note: str) -> bool:
+        if self.mode != "summary":
+            return False
+        self.posted, self.note = ok, note
+        return True
 
     def offer_reply(self, offer: ReplyOffer, result_token: int) -> int | None:
         """Replace the result screen with a reply offer -- only if the user is still looking at
@@ -556,13 +595,18 @@ class ActionFlow:
             order = CloseOrder(
                 order.coin, order.side, order.fraction, min(order.size, position.size)
             )
+        via_alert = armed.from_kind == "alert" or (
+            armed.from_kind == "sl" and self.parent == "alert"
+        )
         self._go("sending")
-        return Outcome(execute=order)
+        return Outcome(execute=order, extra={"via_alert": via_alert})
 
     def _fail(self, message: str, status: ResultStatus = "rejected") -> Outcome:
         token = self._go("result")  # keeps self.armed (if any) so the result can name the action
         self.result = OrderResult(False, status, message)
-        return Outcome(ok=False, note=message, timer_s=RESULT_HOLD_S, token=token)
+        return Outcome(
+            ok=False, note=message, timer_s=RESULT_HOLD_S, token=token, blocked=status == "blocked"
+        )
 
     def finish(self, result: OrderResult) -> Outcome:
         """The order came back: show the result, then fall back to the HUD."""
@@ -616,6 +660,8 @@ class ActionFlow:
                 expires_in_ms=max(0, int((a.armed_at + CONFIRM_WINDOW_S - now) * 1000)),
                 **a.view,
             )
+        elif self.mode == "summary" and self.summary is not None:
+            base.update(summary=self.summary, posted=self.posted, note=self.note)
         elif self.mode == "reply" and self.reply is not None:
             base.update(to=self.reply.target.name, text=self.reply.text, source=self.reply.source)
             if self.result is not None:  # keep the fill visible: a template draft is instant

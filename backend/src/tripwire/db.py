@@ -4,6 +4,7 @@
   intent_log            every intent the glasses sent (audit trail for later risk actions)
   order_log             every reduce-only close that was confirmed on the glasses, and its result
   kv                    small persistent switches (kill switch, alert threshold), no secrets
+  sessions              one row per ended trading session (the summary as JSON; numbers only)
 
 Each call opens its own short-lived connection; callers run these via asyncio.to_thread().
 """
@@ -46,6 +47,12 @@ CREATE TABLE IF NOT EXISTS order_log (
     oid          INTEGER,
     message      TEXT NOT NULL,
     kind         TEXT NOT NULL DEFAULT 'close'   -- close / stop / open
+);
+CREATE TABLE IF NOT EXISTS sessions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_ms    INTEGER NOT NULL,
+    ended_ms      INTEGER NOT NULL,
+    summary_json  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS kv (
     key         TEXT PRIMARY KEY,
@@ -161,6 +168,21 @@ class Store:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM order_log ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def log_session(self, *, started_ms: int, ended_ms: int, summary_json: str) -> None:
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                "INSERT INTO sessions (started_ms, ended_ms, summary_json) VALUES (?, ?, ?)",
+                (started_ms, ended_ms, summary_json),
+            )
+
+    def recent_sessions(self, limit: int = 10) -> list[dict[str, object]]:
+        with closing(self._connect()) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM sessions ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
             return [dict(r) for r in rows]
 

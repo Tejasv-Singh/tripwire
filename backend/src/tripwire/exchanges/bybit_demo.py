@@ -65,3 +65,6 @@ class BybitDemoAdapter:
 
     async def realized_pnl_today(self) -> float:
         return 0.0
+
+    async def realized_pnl_since(self, start_ms: int) -> float:
+        return 0.0

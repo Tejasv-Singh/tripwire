@@ -15,6 +15,7 @@ Interface (the four the brief asked for, plus helpers the screens need):
   place_order(o)          open / add (limit or market) with its SL (and TP) attached
   current_stop(coin)      the position's current stop-loss (for "SL tighter 1%" / display)
   realized_pnl_today()    realized PnL since 00:00 UTC (policy guard's daily loss lock)
+  realized_pnl_since(ms)  realized PnL since a time (session summary); WATCH: the watched account
   size_decimals(coin)     lot size, so the confirm screen shows exactly what will be sent
 """
 
@@ -64,6 +65,8 @@ class ExchangeAdapter(Protocol):
     async def current_stop(self, coin: str) -> StopInfo | None: ...
 
     async def realized_pnl_today(self) -> float: ...
+
+    async def realized_pnl_since(self, start_ms: int) -> float: ...
 
 
 async def positions_stream(state: MarketState) -> AsyncIterator[list[Position]]:

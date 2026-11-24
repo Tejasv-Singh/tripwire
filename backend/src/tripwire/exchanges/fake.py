@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import time
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -41,6 +42,7 @@ class FakeAdapter:
             coin: StopInfo(coin, next(self._oids), px) for coin, px in (stops or {}).items()
         }
         self.realized = 0.0
+        self.realized_log: list[tuple[int, float]] = []  # (ms, pnl) per fill, for sessions
         self.calls: list[tuple[str, Any]] = []  # every order method call, for tests
         self.status: TradingStatus = "ready"
         self.detail = "FAKE exchange (in memory, nothing is sent)"
@@ -72,6 +74,9 @@ class FakeAdapter:
     async def realized_pnl_today(self) -> float:
         return self.realized
 
+    async def realized_pnl_since(self, start_ms: int) -> float:
+        return sum(pnl for ms, pnl in self.realized_log if ms >= start_ms)
+
     # --- orders ------------------------------------------------------------------------------
     async def close_reduce_only(self, order: CloseOrder) -> OrderResult:
         self.calls.append(("close", order))
@@ -84,7 +89,9 @@ class FakeAdapter:
         size = round_size_down(size, self.decimals)
         px = self._mid(order.coin)
         sign = 1 if szi > 0 else -1
-        self.realized += sign * size * (px - float(row["entryPx"]))
+        pnl = sign * size * (px - float(row["entryPx"]))
+        self.realized += pnl
+        self.realized_log.append((int(time.time() * 1000), pnl))
         row["szi"] = f"{szi - sign * size:.{self.decimals}f}"
         if float(row["szi"]) == 0:
             self.stops.pop(order.coin, None)  # a positionTpsl stop dies with its position
