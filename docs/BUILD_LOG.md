@@ -1172,3 +1172,39 @@ How the draft text is made:
   (modules, the one order path, next steps) updated.
 
 Final state: **268 backend tests**, **37 plugin tests**; ruff, mypy strict and tsc clean.
+
+### 22. Real Telegram check by the user (2026-11-24, ~23:35–23:42 IST)
+
+**Setup:** the user added `TELEGRAM_OWNER_ID` (their numeric id, from the bot's `/start` reply)
+to `.env` and restarted `backend:dev`.
+
+**Problem: the bot still treated them as a stranger.**
+- Cause: **two backends were polling with the same token.** The `backend:dev` started at 13:28
+  kept running after its terminal tab was closed (Ctrl+C never reached it). It had never read
+  the new `.env`, and Telegram handed `/start` to it.
+- The new backend logged
+  `Conflict: terminated by other getUpdates request; make sure that only one bot instance is running`
+  every few seconds, as a one-line warning thanks to §12's `error_callback`.
+- Found by listing `uvicorn` processes with their start times: one tree from 13:28 and one from
+  23:34.
+- The user stopped the old tree with `taskkill /PID <pid> /T /F`. The assistant's own attempt
+  was blocked by the permission check, which is correct: it's the user's process.
+- The Conflict lines stopped by themselves within about 30 s, with no restart of the new backend.
+- The fix is in the README troubleshooting table.
+
+**Verified by the user on real Telegram:**
+- `/start` → "You are the owner".
+- `/status`.
+- Two typed drafts reached the handler (log `draft candidate ... forwarded=False`; the text is
+  never logged).
+- `/kill` → `KILL SWITCH engaged (Telegram)` → `/unkill` → `Kill switch released via Telegram`.
+- `/threshold`.
+- The user reports all of them working.
+- End state from `/healthz`: kill switch off, threshold 5 %, price-only mode.
+
+**Still not verified on real Telegram:**
+- **The alert DM**: no alert fired (`alerts.fired = 0`), because price-only mode has no
+  positions. It needs `WATCH_ADDRESS` (or an own account), the glasses closed, and
+  `/threshold` above a position's liquidation distance.
+- A *forwarded* (not typed) message: same handler, filter `TEXT | CAPTION`.
+- Business inbox and replies: need Premium.
