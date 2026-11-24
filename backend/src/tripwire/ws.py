@@ -201,6 +201,7 @@ def make_ws_router(
                 now=loop.time(),
                 trading=trading_on(),
                 size_decimals=executor.size_decimals(position.coin) if position else None,
+                watch=state.watch,
             )
             count = len(state.positions)
             if out.nav is not None:

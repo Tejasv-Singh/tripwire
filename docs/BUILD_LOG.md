@@ -588,3 +588,60 @@ times. Telegram reconnected without being throttled each time; at the end, `/hea
 - Real glasses.
 - Whether HL's testnet accepts reduce-only partials below its $10 minimum order value. If not,
   the exchange's error message shows on the result screen.
+
+---
+
+## 2026-11-24 · Day 2 continued (no funded account needed)
+
+The user's list, in the order built. The policy guard (4) and the adapter (7) come before 5, 3, 2
+and 6 because every order path below goes through both. One commit per item.
+
+### 13. WATCH mode: follow a public testnet address, read-only (item 1)
+
+**What:** `WATCH_ADDRESS` in `.env`. If `HL_ACCOUNT_ADDRESS` is empty and `WATCH_ADDRESS` is
+set, the backend streams that address's positions. The HUD header says `TRIPWIRE WATCH`, the
+footer says `watch only  swipe: next  2x: exit`, and tapping does nothing (ack
+`ok:false, note:"watch only"`). Trading is forced off (`DisabledExecutor("watch only: ...")`),
+even if an agent key is set.
+
+**Deviation: `clearinghouseState`, not `webData2`.** The request said "via public
+info/webData2". Re-checked on 2026-11-24: testnet still rejects `webData2` (`Error parsing JSON
+into valid websocket request`). `clearinghouseState {user}` carries the same positions, is public
+for any address, and is what the feed already used for the own account. So WATCH is just "stream
+someone else's address".
+
+**Code:**
+- `config.py`:
+  - New fields: `watch_address` (validated and lowercased like `HL_ACCOUNT_ADDRESS`),
+    `watch_mode` and `stream_address`. The own account wins if both are set.
+- `state.py`:
+  - `MarketState(account=..., watch=...)`, plus `mode` (`account` / `watch` / `price`) and
+    `account_short` (`0x1234...abcd`).
+- `hud.py`:
+  - Frames gain `watch` and `address`.
+- `actions.py`:
+  - `handle(..., watch=)` refuses the menu.
+- `main.py`:
+  - The startup log line and `/healthz` → `hyperliquid.mode` / `address` say which mode is on.
+- `hl/feed.py`:
+  - **`MAX_CTX_SUBS = 25`**: at most 25 `activeAssetCtx` subscriptions, with the reference coin
+    first. Some testnet addresses are market makers with 150+ positions; coins past the cap use
+    mid as "mark" and the HUD says `(mid)`.
+- Plugin `hud.ts`:
+  - `headerLine(now, tag)`, `FOOTERS.watch`, and `Watching 0x1234...abcd: no position` when the
+    watched address is flat. With the link down the WATCH tag is not shown.
+
+**Finder script:** `npm run watch:find` (`backend/scripts/find_active_addresses.py`).
+- It listens to the public `trades` stream (ETH, BTC, SOL; 20 s by default). Every trade carries
+  `users: [buyer, seller]`. It then asks `/info clearinghouseState` which of those traders hold
+  positions, and prints full addresses with the largest position and its liquidation distance.
+  Addresses with a liquidation price and few positions are listed first.
+- Options: `--seconds`, `--coins`, `--limit`. Read-only, no keys, and it calls `assert_testnet`.
+- First run: 25 traders in 15 s, 6 with positions, e.g. `0xb7bd...6422` (7 positions).
+
+**Checks:**
+- Tests: **115 backend tests pass** (+5, new `test_watch.py`); plugin 29 (+1).
+- Live: a throwaway app (port 8011, bot off) watched `0xb7bd...6422` on the real testnet feed.
+  `/healthz` showed `mode: watch, positions: 7`, `trading: off - watch only`, and real positions
+  with markPx, e.g. `BTC SHORT 0.03591 @ 59463.0 mark=59363.0 upnl=4.45 liq=164468.8`.
+- The simulator check is in §20 (exit check).

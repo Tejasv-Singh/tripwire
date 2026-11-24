@@ -9,7 +9,9 @@ The SDK is still the source of truth for the testnet URL (see config.assert_test
 Subscriptions:
   allMids                       -> mids for every coin (testnet pushes ~every 5 s)
   activeAssetCtx {coin}         -> markPx + midPx, ~1 Hz, for the reference coin + position coins
-  clearinghouseState {user}     -> positions (only when HL_ACCOUNT_ADDRESS is set)
+  clearinghouseState {user}     -> positions of HL_ACCOUNT_ADDRESS, or of WATCH_ADDRESS (public,
+                                   read-only). webData2 would carry the same data but testnet
+                                   rejects it (re-checked 2026-11-24).
 """
 
 from __future__ import annotations
@@ -32,6 +34,9 @@ PING_EVERY_S = 30.0  # HL closes connections that send nothing for 60 s
 STALE_AFTER_S = 30.0  # no message at all for this long -> reconnect
 BACKOFF_MAX_S = 30.0
 MAX_MSG_BYTES = 8 * 1024 * 1024  # allMids lists ~3.5k coins
+# activeAssetCtx subscriptions per connection. A watched market maker can hold 150+ positions;
+# coins past the cap fall back to mid for "mark" (the HUD says "(mid)").
+MAX_CTX_SUBS = 25
 
 
 class StaleFeedError(RuntimeError):
@@ -123,9 +128,13 @@ class HyperliquidFeed:
     async def _sync_ctx_subscriptions(self, ws: ClientConnection) -> None:
         """Subscribe activeAssetCtx for any newly watched coin (ref coin + open positions).
         Coins that close stay subscribed until the next reconnect -- harmless and simpler."""
-        for coin in sorted(self.state.watched_coins() - self._ctx_coins):
-            await self._subscribe(ws, {"type": "activeAssetCtx", "coin": coin})
-            self._ctx_coins.add(coin)
+        wanted = [self.state.ref_coin] + sorted(self.state.watched_coins() - {self.state.ref_coin})
+        for coin in wanted:
+            if len(self._ctx_coins) >= MAX_CTX_SUBS:
+                break
+            if coin not in self._ctx_coins:
+                await self._subscribe(ws, {"type": "activeAssetCtx", "coin": coin})
+                self._ctx_coins.add(coin)
 
     async def _pump(self, ws: ClientConnection) -> None:
         last_ping = time.monotonic()

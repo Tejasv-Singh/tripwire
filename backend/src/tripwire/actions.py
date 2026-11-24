@@ -106,12 +106,16 @@ class ActionFlow:
         now: float,
         trading: bool,
         size_decimals: int | None = None,
+        watch: bool = False,
     ) -> Outcome:
-        """`position` = the position this client is looking at (the locked coin once in a menu)."""
+        """`position` = the position this client is looking at (the locked coin once in a menu).
+        `watch` = the positions are someone else's (WATCH_ADDRESS): the menu stays closed."""
         if self.mode == "hud":
             if intent in ("next", "prev"):
                 return Outcome(nav=intent)
             if intent == "tap":
+                if watch:
+                    return Outcome(ok=False, note="watch only")
                 if position is None:
                     return Outcome(ok=False, note="no open position")
                 self.coin = position.coin

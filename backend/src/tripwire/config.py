@@ -51,6 +51,8 @@ class Settings(BaseSettings):
 
     # --- user-provided -------------------------------------------------------------------------
     hl_account_address: str = ""  # public 0x address; empty -> HUD shows only the reference price
+    # Any public testnet address to follow read-only when HL_ACCOUNT_ADDRESS is empty ("WATCH").
+    watch_address: str = ""
     hl_agent_key: SecretStr = SecretStr("")  # API/agent wallet key; empty -> trading off
     telegram_bot_token: SecretStr = SecretStr("")  # empty -> bot skipped
     anthropic_api_key: SecretStr = SecretStr("")  # unused on Day 1
@@ -62,14 +64,12 @@ class Settings(BaseSettings):
     db_path: Path = Path("data/tripwire.sqlite3")
     log_level: str = "INFO"
 
-    @field_validator("hl_account_address")
+    @field_validator("hl_account_address", "watch_address")
     @classmethod
     def _check_address(cls, v: str) -> str:
         v = v.strip()
         if v and not _ADDRESS_RE.match(v):
-            raise ValueError(
-                "HL_ACCOUNT_ADDRESS must be empty or a 0x-prefixed 40-hex-char address"
-            )
+            raise ValueError("must be empty or a 0x-prefixed 40-hex-char address")
         return v.lower()
 
     @field_validator("hl_agent_key")
@@ -89,6 +89,16 @@ class Settings(BaseSettings):
         if len(v.get_secret_value().strip()) < MIN_PAIRING_CODE_LEN:
             raise ValueError(f"PAIRING_CODE must be at least {MIN_PAIRING_CODE_LEN} characters")
         return SecretStr(v.get_secret_value().strip())
+
+    @property
+    def watch_mode(self) -> bool:
+        """WATCH = follow someone else's public positions; never trade. The own account wins."""
+        return bool(self.watch_address and not self.hl_account_address)
+
+    @property
+    def stream_address(self) -> str:
+        """Whose clearinghouseState the feed subscribes to ("" = reference price only)."""
+        return self.hl_account_address or self.watch_address
 
     @property
     def trading_enabled(self) -> bool:

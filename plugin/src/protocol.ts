@@ -79,6 +79,10 @@ export interface HudFrame {
   network: 'testnet'
   feed: { connected: boolean; age_ms: number | null }
   account: boolean
+  /** positions belong to WATCH_ADDRESS (someone else's): read-only, the menu is disabled */
+  watch: boolean
+  /** shortened address being streamed ("0x1234...abcd"), "" in price-only mode */
+  address: string
   view: { index: number; count: number }
   position: Position | null
   ref: { coin: string; mid: number | null; mark: number | null; mark_source: MarkSource }

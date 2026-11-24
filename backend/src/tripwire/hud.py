@@ -78,6 +78,8 @@ def build_hud_frame(
             "age_ms": None if age is None else int(age * 1000),
         },
         "account": bool(state.account),
+        "watch": state.watch,  # positions are someone else's: read-only, menu disabled
+        "address": state.account_short,
         "view": {"index": idx, "count": count},
         "position": position,
         "ref": {

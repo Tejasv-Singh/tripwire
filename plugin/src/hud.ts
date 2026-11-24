@@ -8,13 +8,14 @@ export const MAX_COLS = 46
 export const MAX_LINES = 9
 const BODY_LINES = MAX_LINES - 3 // header + separator + footer are always shown
 const SEPARATOR = '-'.repeat(40)
-export const FOOTERS: Record<UiMode | 'link', string> = {
+export const FOOTERS: Record<UiMode | 'link' | 'watch', string> = {
   hud: 'tap: actions  swipe: next  2x: exit',
   menu: 'tap: select  swipe: move  2x: back',
   confirm: 'tap: SEND  swipe/2x: cancel',
   sending: 'sending... please wait',
   result: 'tap/swipe/2x: back to HUD',
   link: 'tap: actions  swipe: next  2x: exit',
+  watch: 'watch only  swipe: next  2x: exit', // WATCH_ADDRESS: the menu is disabled
 }
 
 export type LinkView =
@@ -86,8 +87,9 @@ export function fmtClock(d: Date): string {
 
 // --- lines ---------------------------------------------------------------------------------------
 
-export function headerLine(now: Date): string {
-  return 'TRIPWIRE'.padEnd(20) + 'TESTNET'.padEnd(13) + fmtClock(now)
+/** `tag` marks a special mode next to the name, e.g. "WATCH" (read-only, someone else's account). */
+export function headerLine(now: Date, tag = ''): string {
+  return `TRIPWIRE${tag ? ` ${tag}` : ''}`.padEnd(20) + 'TESTNET'.padEnd(13) + fmtClock(now)
 }
 
 function positionLines(p: Position, index: number, count: number): string[] {
@@ -109,7 +111,11 @@ function referenceLines(f: HudFrame): string[] {
   const px = mark ?? mid
   const label = mark_source === 'markPx' ? 'mark' : 'mid'
   const l1 = px === null ? `${coin}-PERP  waiting for price...` : `${coin}-PERP  ${fmtLive(px)}  ${label}`
-  const l2 = f.account ? 'No open position' : 'No account set (price only)'
+  const l2 = f.watch
+    ? `Watching ${f.address}: no position`
+    : f.account
+      ? 'No open position'
+      : 'No account set (price only)'
   return [l1, l2]
 }
 
@@ -213,8 +219,9 @@ export function renderHud({ frame, link, now, frameAgeMs }: HudInput): string {
   } else {
     body.push(...linkLines(link))
   }
-  const footer = link.kind === 'open' ? FOOTERS[mode] : FOOTERS.link
-  const lines = [headerLine(now), ...body.slice(0, BODY_LINES), SEPARATOR, footer]
+  const watch = link.kind === 'open' && frame?.watch === true
+  const footer = link.kind !== 'open' ? FOOTERS.link : watch && mode === 'hud' ? FOOTERS.watch : FOOTERS[mode]
+  const lines = [headerLine(now, watch ? 'WATCH' : ''), ...body.slice(0, BODY_LINES), SEPARATOR, footer]
   return lines.map(fit).join('\n')
 }
 

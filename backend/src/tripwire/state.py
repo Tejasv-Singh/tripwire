@@ -20,9 +20,10 @@ Listener = Callable[[], None]
 
 
 class MarketState:
-    def __init__(self, *, ref_coin: str = "ETH", account: str = "") -> None:
+    def __init__(self, *, ref_coin: str = "ETH", account: str = "", watch: bool = False) -> None:
         self.ref_coin = ref_coin  # always-shown reference coin when there is no position
-        self.account = account  # "" -> no clearinghouse subscription, no positions
+        self.account = account  # address streamed; "" -> no clearinghouse subscription
+        self.watch = watch and bool(account)  # True: `account` is someone else's, read-only
         self.mids: dict[str, float] = {}
         self.marks: dict[str, float] = {}
         self.asset_positions: list[Any] = []
@@ -49,6 +50,18 @@ class MarketState:
             fn()
 
     # --- derived -------------------------------------------------------------------------------
+    @property
+    def mode(self) -> str:
+        """ "account" (own positions), "watch" (someone else's, read-only) or "price" (none)."""
+        if not self.account:
+            return "price"
+        return "watch" if self.watch else "account"
+
+    @property
+    def account_short(self) -> str:
+        a = self.account
+        return f"{a[:6]}...{a[-4:]}" if a else ""
+
     def watched_coins(self) -> set[str]:
         return {self.ref_coin} | {p.coin for p in self.positions}
 

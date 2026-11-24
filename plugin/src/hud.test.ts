@@ -29,7 +29,7 @@ const ethLong: Position = {
 function frame(over: Partial<HudFrame> = {}): HudFrame {
   return {
     type: 'hud', v: 2, seq: 1, ts: 0, network: 'testnet',
-    feed: { connected: true, age_ms: 300 }, account: false,
+    feed: { connected: true, age_ms: 300 }, account: false, watch: false, address: '',
     view: { index: 0, count: 0 }, position: null,
     ref: { coin: 'ETH', mid: 1721.75, mark: 1721.9, mark_source: 'markPx' },
     ui: { mode: 'hud' }, trading: { enabled: false, status: 'off' },
@@ -61,6 +61,25 @@ describe('renderHud', () => {
       '----------------------------------------',
       'tap: actions  swipe: next  2x: exit',
     ])
+  })
+
+  it('WATCH mode: header tag, watch-only footer, and the watched address when flat', () => {
+    const watched = frame({
+      account: true, watch: true, address: '0xb7bd...6422', position: ethLong,
+      view: { index: 0, count: 1 },
+    })
+    const lines = renderHud({ frame: watched, link: { kind: 'open' }, now: NOW }).split('\n')
+    expect(lines[0]).toBe('TRIPWIRE WATCH      TESTNET      09:05')
+    expect(lines.at(-1)).toBe(FOOTERS.watch)
+    expect(lines.at(-1)).toBe('watch only  swipe: next  2x: exit')
+    const flat = renderHud({
+      frame: frame({ account: true, watch: true, address: '0xb7bd...6422' }), link: { kind: 'open' }, now: NOW,
+    })
+    expect(flat).toContain('Watching 0xb7bd...6422: no position')
+    assertFits(flat)
+    // link down: no WATCH tag (we don't know what the backend is doing)
+    const down = renderHud({ frame: watched, link: { kind: 'retrying', inSeconds: 2 }, now: NOW })
+    expect(down.split('\n')[0]).toBe(headerLine(NOW))
   })
 
   it('shows the ETH mark price when there is no position', () => {

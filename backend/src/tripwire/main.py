@@ -78,7 +78,7 @@ def create_app(
     assert_testnet(settings.hl_api_url)  # refuse to start on anything but testnet
     configure_logging(settings.log_level)
 
-    state = MarketState(ref_coin="ETH", account=settings.hl_account_address)
+    state = MarketState(ref_coin="ETH", account=settings.stream_address, watch=settings.watch_mode)
     store = Store(settings.resolved_db_path)
     bot = TelegramBot(settings.telegram_bot_token.get_secret_value() if run_bot else "", store)
     feed = HyperliquidFeed(settings.hl_api_url, state) if run_feed else None
@@ -90,7 +90,11 @@ def create_app(
                 agent_key=settings.hl_agent_key.get_secret_value(),
             )
             if settings.trading_enabled
-            else DisabledExecutor()
+            else DisabledExecutor(
+                "watch only: WATCH_ADDRESS is someone else's account"
+                if settings.watch_mode
+                else "set HL_ACCOUNT_ADDRESS and HL_AGENT_KEY in .env"
+            )
         )
     trader: OrderExecutor = executor
 
@@ -101,8 +105,12 @@ def create_app(
         warm_task = asyncio.create_task(trader.warm_up(), name="trading-warm-up")
         await bot.start()
         log.info(
-            "Tripwire backend up: network=testnet account=%s trading=%s telegram=%s",
-            "set" if settings.hl_account_address else "none (reference price only)",
+            "Tripwire backend up: network=testnet positions=%s trading=%s telegram=%s",
+            {
+                "account": "own account",
+                "watch": f"WATCH {state.account_short} (read-only)",
+                "price": "none (reference price only)",
+            }[state.mode],
             trader.status,
             bot.status,
         )
@@ -145,6 +153,8 @@ def create_app(
                 "connected": state.connected,
                 "last_msg_age_ms": None if age is None else int(age * 1000),
                 "account_configured": bool(settings.hl_account_address),
+                "mode": state.mode,
+                "address": state.account_short,
                 "positions": len(state.positions),
                 "reconnects": feed.reconnects if feed else 0,
             },
