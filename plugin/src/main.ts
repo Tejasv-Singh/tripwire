@@ -14,11 +14,13 @@ import { GlassesDisplay } from './glasses'
 import { currentMode, renderHud, type LinkView } from './hud'
 import { commandFromEvent } from './input'
 import { BackendLink } from './link'
-import { PROTOCOL_VERSION, type HudFrame } from './protocol'
+import { PROTOCOL_VERSION, type HudFrame, type RenderedMessage } from './protocol'
 import { logLine, mountUi, setChip, setHealth, setMirror, setPairingCodeField } from './ui'
 import { PushToTalk } from './voice'
 
-const CLOCK_TICK_MS = 10_000 // keeps HH:MM and "link stale" fresh between frames
+// keeps HH:MM and the 3 s STALE counter fresh between frames; identical text is never re-sent to
+// the glasses (glasses.ts), so a tick costs nothing while nothing changes
+const CLOCK_TICK_MS = 1_000
 const HEALTH_POLL_MS = 30_000
 
 let bridge: EvenAppBridge | null = null
@@ -28,6 +30,9 @@ let frame: HudFrame | null = null
 let linkView: LinkView = { kind: 'connecting', attempt: 1 }
 let pairingCode = ''
 let ptt: PushToTalk | null = null // created after the link; read by render() before that
+// latency (backend latency.py): the newest frame with new exchange data, until its text is drawn
+let awaitingRender: { text: string; seq: number; src_ms: number } | null = null
+let lastAckedSrc = 0
 
 mountUi(BACKEND_URL, { onSavePairingCode: savePairingCode })
 
@@ -35,7 +40,14 @@ bridge = await waitForEvenAppBridge()
 pairingCode = await loadPairingCode(bridge)
 setPairingCodeField(pairingCode)
 
-display = new GlassesDisplay(bridge, logLine)
+display = new GlassesDisplay(bridge, logLine, (text) => {
+  // the glasses really show this frame now: tell the backend (exchange event -> render latency).
+  // A frame whose text never reaches the display (identical, or overtaken by a newer one) gets no ack.
+  if (!awaitingRender || awaitingRender.text !== text) return
+  link?.sendJson({ type: 'rendered', seq: awaitingRender.seq, src_ms: awaitingRender.src_ms } satisfies RenderedMessage)
+  lastAckedSrc = awaitingRender.src_ms
+  awaitingRender = null
+})
 await display.init(currentText())
 
 link = new BackendLink({
@@ -43,9 +55,12 @@ link = new BackendLink({
   getPairingCode: () => pairingCode,
   onFrame: (f) => {
     frame = f
-    render()
+    render((text) => {
+      if (f.src_ms && f.src_ms !== lastAckedSrc) awaitingRender = { text, seq: f.seq, src_ms: f.src_ms }
+    })
   },
   onLink: (view) => {
+    if (view.kind !== 'open') void ptt?.reset() // never keep the mic streaming into a dead socket
     linkView = view
     updateChip()
     render()
@@ -127,7 +142,7 @@ const unsubscribe = bridge.onEvenHubEvent((event) => {
   }
 })
 
-setInterval(render, CLOCK_TICK_MS)
+setInterval(() => render(), CLOCK_TICK_MS)
 void pollHealth()
 setInterval(() => void pollHealth(), HEALTH_POLL_MS)
 
@@ -152,8 +167,10 @@ function currentText(): string {
   })
 }
 
-function render(): void {
+/** `beforeShow` sees the text before it is queued for the glasses (main.ts latency acks). */
+function render(beforeShow?: (text: string) => void): void {
   const text = currentText()
+  beforeShow?.(text)
   setMirror(text)
   display?.show(text)
 }

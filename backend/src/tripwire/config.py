@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Literal
 
 from hyperliquid.utils import constants
 from pydantic import SecretStr, field_validator
@@ -77,6 +78,9 @@ class Settings(BaseSettings):
     alert_liq_pct: float = 5.0  # alert when liq is this % or closer to mark (Telegram /threshold)
     alert_hysteresis_pct: float = 1.0  # re-arm only once it is threshold + this % away again
     alert_snooze_s: float = 300.0  # "Snooze 5m" on the glasses
+
+    # "unicode" draws ▲ ━ ● on the glasses; "ascii" falls back to /!\ - * if a display shows boxes
+    glyphs: Literal["unicode", "ascii"] = "unicode"
 
     # --- push-to-talk voice commands (voice.py) --------------------------------------------------
     voice_enabled: bool = True  # local faster-whisper; false = the long-press does nothing

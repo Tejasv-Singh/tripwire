@@ -225,6 +225,19 @@ export interface HudFrame {
   inbox?: InboxSummary | null
   /** push-to-talk line, shown ~2 s: what was heard and what happened */
   voice?: VoiceOverlay | null
+  /** backend wall ms when the shown exchange data arrived; echoed in a "rendered" ack */
+  src_ms?: number | null
+  /** "unicode" (▲ ━ ●) or "ascii" (/!\ - *): GLYPHS in the backend .env */
+  glyphs?: Glyphs
+}
+
+export type Glyphs = 'unicode' | 'ascii'
+
+/** Sent after a frame with new exchange data was drawn on the glasses (latency, backend). */
+export interface RenderedMessage {
+  type: 'rendered'
+  seq: number
+  src_ms: number
 }
 
 export interface VoiceOverlay {

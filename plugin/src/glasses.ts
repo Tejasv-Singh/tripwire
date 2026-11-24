@@ -22,6 +22,8 @@ export class GlassesDisplay {
   constructor(
     private readonly bridge: EvenAppBridge,
     private readonly log: (msg: string) => void = () => {},
+    /** called after each text actually reached the glasses (latency acks, main.ts) */
+    private readonly onRendered: (text: string) => void = () => {},
   ) {}
 
   /** Create the startup page. Must be called once before any other glasses UI call. */
@@ -71,8 +73,10 @@ export class GlassesDisplay {
             content: text,
           }),
         )
-        if (ok) this.lastShown = text
-        else this.log('textContainerUpgrade returned false')
+        if (ok) {
+          this.lastShown = text
+          this.onRendered(text)
+        } else this.log('textContainerUpgrade returned false')
       }
     } catch (err) {
       this.log(`textContainerUpgrade threw: ${(err as Error)?.message ?? String(err)}`)

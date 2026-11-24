@@ -61,6 +61,45 @@ stop moves), `rejected`, `error`, **`blocked`** (policy guard; nothing sent) and
 `sending reply to @alice`, `reply skipped`, `loading the current stop-loss - tap again`, or
 `Blocked: <policy reason>`.
 
+## Day 3 additions (still additive: `v` stays 2)
+
+**Push-to-talk (voice.ts / ws.py / voice.py):**
+
+| Direction | Frame | Meaning |
+|---|---|---|
+| client → server | `{"type":"voice","action":"start"}` | long press began; the mic is open |
+| client → server | **binary** frames | raw mic PCM, 16 kHz s16le mono (100 ms = 3,200 B each), **only** between `start` and `stop`. Anything else binary is ignored and never stored. Max 8 s |
+| client → server | `{"type":"voice","action":"stop"}` / `"cancel"` | released: transcribe / throw the audio away |
+| server → client | `{"type":"voice","state":"listening"\|"heard"\|"error","text","command","ok","note"}` | what was heard and what it did |
+
+`hud` frames carry **`voice`**: `{"state","text","note"}` or `null`. It is shown in place of the
+header for ~2 s (4 s for `status`). Voice only **arms**: the same two-tap confirm sends. On the
+reply screen, speech replaces the draft text.
+
+**Session screens:** `ui.mode` can also be
+
+```json
+{"mode": "end", "coin": null, "summary": {...live numbers...}}
+{"mode": "summary", "coin": null, "summary": {...}, "posted": null, "note": null}
+```
+
+`summary` = `{started_ms, ended_ms, duration_s, mode, trades, dry_runs, realized, unrealized,
+session_pnl, max_drawdown, alerts_fired, alerts_acted, alerts_snoozed, policy_blocks}`.
+- `back` (double tap) on the HUD now opens `end`. The plugin exits only on a double tap on `end`
+  / `summary`, or while the link is down.
+- `end`: `tap` ends the session and opens `summary`; `next` / `prev` go back to the HUD.
+- `summary`: `tap` posts to `JOURNAL_CHAT_ID` (`posted` true/false plus `note`); a swipe goes to
+  the HUD.
+
+**Robustness (BUILD_LOG §26):**
+
+| Field / frame | Meaning |
+|---|---|
+| `hello.heartbeat_ms` | now **1000**: a `hud` frame at least every second, so > 3 s of silence = STALE on the glasses |
+| `hello.glyphs`, `hud.glyphs` | `"unicode"` (▲ ━ ●) or `"ascii"` (/!\ - *), from `GLYPHS` in `.env`. Missing = the Day-2 look |
+| `hud.src_ms` | int ms \| null: backend wall clock when the exchange data in this frame arrived (`MarketState.last_change_ms`) |
+| client → server `{"type":"rendered","seq":N,"src_ms":T}` | sent once per new `src_ms`, after `textContainerUpgrade` for that frame's text returned ok. The backend records `now − src_ms` → p50/p95 in `/status` and `/healthz → latency`. A malformed one → `bad_message` |
+
 ## Endpoint and auth
 
 ```
@@ -90,8 +129,8 @@ wss://<backend-host>/ws?code=<PAIRING_CODE>
 ### `hello` (once, right after a successful connect)
 
 ```json
-{"type": "hello", "v": 2, "network": "testnet", "min_interval_ms": 500, "heartbeat_ms": 5000,
- "trading": {"enabled": false, "status": "off"}}
+{"type": "hello", "v": 2, "network": "testnet", "min_interval_ms": 500, "heartbeat_ms": 1000,
+ "trading": {"enabled": false, "status": "off"}, "glyphs": "unicode"}
 ```
 
 ### `hud` (immediately after `hello`, then on change ≤ every 500 ms, plus a heartbeat every 5 s)
@@ -227,8 +266,9 @@ The connection stays open.
 | `tap` | tap | open menu (needs a position) | Back → hud; Close N% → **arm** (confirm screen) | **send** (if ≥ 0.3 s and ≤ 5 s after arming) | ignored | → hud |
 | `back` | double tap (not on the HUD) | — | → hud | cancel → hud | ignored | → hud |
 
-A double tap **on the HUD** never reaches the backend: the plugin exits the app. When the link is
-down the plugin always treats the screen as the HUD, so a double tap can always exit.
+Since Day 3 a double tap **on the HUD** is sent as `back` and opens `End session?`; the plugin
+exits the app on a double tap on `end` / `summary`. When the link is down the plugin always treats
+the screen as the HUD and a double tap exits at once, so you can always leave.
 
 Anything else (unknown `type`/`action`, including v1's `"actions"`, non-JSON) → `error`
 `bad_message`. Every valid intent is appended to `intent_log` (timestamp, action, client address).
@@ -242,15 +282,18 @@ was shown, capped at the live size. Every order is reduce-only (`trading.py`).
 | Knob | Value | Where |
 |---|---|---|
 | Min gap between `hud` frames | 500 ms (bursts coalesce, latest state wins) | `MIN_INTERVAL_S` in `ws.py`, or `create_app(min_interval_s=…)` |
-| Heartbeat `hud` frame when nothing changes | 5 s | `HEARTBEAT_S` in `ws.py`, or `create_app(heartbeat_s=…)` |
+| Heartbeat `hud` frame when nothing changes | 1 s (5 s before Day 3) | `HEARTBEAT_S` in `ws.py`, or `create_app(heartbeat_s=…)` |
 | Confirm window (second tap) | 5 s | `CONFIRM_WINDOW_S` in `actions.py` |
 | Minimum gap between the two taps | 0.3 s (a bounced tap is not a confirm) | `MIN_CONFIRM_GAP_S` in `actions.py` |
 | Result screen → HUD | 8 s, or any input | `RESULT_HOLD_S` in `actions.py` |
 | Order slippage cap (IOC limit) | 5 % from mid | `SLIPPAGE` in `trading.py` |
 | Whole-order timeout | 25 s (then "No reply - CHECK positions") | `ORDER_TIMEOUT_S` in `trading.py` |
-| Plugin watchdog (no frame → reconnect) | 15 s | `WATCHDOG_MS` in `plugin/src/link.ts` |
+| Plugin watchdog (no frame → reconnect) | 8 s (15 s before Day 3) | `WATCHDOG_MS` in `plugin/src/link.ts` |
 | Plugin reconnect backoff | 1 s doubling to 15 s | `BACKOFF_*` in `plugin/src/link.ts` |
-| Plugin "link stale" warning on the HUD | 15 s | `STALE_FRAME_MS` in `plugin/src/hud.ts` |
+| Plugin `STALE` line + `!` dot on the HUD | > 3 s without a frame, or prices > 3 s old | `STALE_MS` in `plugin/src/hud.ts` |
+| Plugin re-render tick (clock, STALE counter) | 1 s | `CLOCK_TICK_MS` in `plugin/src/main.ts` |
+| Push-to-talk max length | 8 s | `MAX_TALK_MS` in `plugin/src/voice.ts`, `MAX_VOICE_BYTES` in `ws.py` |
+| Voice overlay on the header | 2 s (status: 4 s) | `ws.py` |
 
 ## Trying it by hand
 

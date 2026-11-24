@@ -249,7 +249,8 @@ def test_status_text_lists_positions_and_upnl(tg_client: tuple[TestClient, FakeA
     )
     assert lines[2] == "Kill switch: off  |  Alerts at 5% liq distance"
     assert lines[3].startswith("ETH-PERP LONG 0.5 @ 3,412  mark 3,494.4  uPnL +41.20 (+2.4%)")
-    assert lines[-1] == "Total uPnL: +41.20 USD"
+    assert lines[-2] == "Total uPnL: +41.20 USD"
+    assert lines[-1].startswith("Latency (HL event -> glasses render):")
 
 
 def test_inbox_line_then_reply_offer_after_a_fill(

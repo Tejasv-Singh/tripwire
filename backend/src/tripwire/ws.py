@@ -55,7 +55,7 @@ log = logging.getLogger(__name__)
 CLOSE_BAD_PAIRING_CODE = 4401
 PENDING_DRAFT_S = 300.0  # a draft forwarded while no glasses were connected waits this long
 MIN_INTERVAL_S = 0.5
-HEARTBEAT_S = 5.0
+HEARTBEAT_S = 1.0  # a frame at least every second, so the glasses can flag >3 s as STALE
 VOICE_OVERLAY_S = 2.0  # how long the transcript stays on the glasses
 STATUS_OVERLAY_S = 4.0  # voice "status" answer
 MAX_VOICE_BYTES = int(MAX_SECONDS * BYTES_PER_SECOND)
@@ -69,6 +69,14 @@ class IntentMessage(BaseModel):
 class VoiceMessage(BaseModel):
     type: Literal["voice"]
     action: Literal["start", "stop", "cancel"]
+
+
+class RenderedMessage(BaseModel):
+    """The plugin finished drawing the frame `seq`, which was built from data received at src_ms."""
+
+    type: Literal["rendered"]
+    seq: int
+    src_ms: int
 
 
 def _log_task_failure(task: asyncio.Task[None]) -> None:
@@ -156,6 +164,8 @@ def make_ws_router(
     status_line: Callable[[], str] | None = None,
     audio_override: Callable[[], bytes | None] | None = None,  # demo only: substitute speech
     sessions: Any = None,  # session.SessionService (screen 6)
+    latency: Any = None,  # latency.LatencyStats
+    glyphs: str = "unicode",
     post_journal: Callable[[str], Awaitable[tuple[bool, str]]] | None = None,
     min_interval_s: float = MIN_INTERVAL_S,
     heartbeat_s: float = HEARTBEAT_S,
@@ -370,6 +380,7 @@ def make_ws_router(
                 trading=trading_info(),
                 inbox=inbox.summary() if inbox is not None else None,
                 voice=session.voice_overlay,
+                glyphs=glyphs,
             )
             session.index = frame["view"]["index"]  # clamp / follow the locked coin
             await send(ws, session, frame)
@@ -510,6 +521,11 @@ def make_ws_router(
                 if isinstance(data, dict) and data.get("type") == "voice":
                     await handle_voice(ws, session, VoiceMessage.model_validate(data))
                     continue
+                if isinstance(data, dict) and data.get("type") == "rendered":
+                    rendered = RenderedMessage.model_validate(data)
+                    if latency is not None:
+                        latency.add_ack(rendered.src_ms)
+                    continue
                 intent = IntentMessage.model_validate(data)
             except (ValueError, ValidationError):
                 await send(
@@ -566,6 +582,7 @@ def make_ws_router(
                 "min_interval_ms": int(min_interval_s * 1000),
                 "heartbeat_ms": int(heartbeat_s * 1000),
                 "trading": trading_info(),
+                "glyphs": glyphs,
             },
         )
         state.add_listener(session.wake)

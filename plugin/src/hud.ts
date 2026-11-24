@@ -1,7 +1,7 @@
 // Pure HUD renderer: (frame, link state, clock) -> glasses text.
 // Hard limits (enforced by hud.test.ts): <= 46 chars per line, <= 9 lines, ASCII only -- except
-// RISK_GLYPH, the one non-ASCII character allowed (it heads the liquidation alert screen).
-// The G2 font is proportional, so column padding is approximate on the real display.
+// the glyphs of the frame's glyph set (GLYPH_SETS below: ▲ ━ ● when the backend says
+// GLYPHS=unicode). The G2 font is proportional, so column padding is approximate on the display.
 
 import type {
   EndScreen,
@@ -19,11 +19,24 @@ import type {
 
 export const MAX_COLS = 46
 export const MAX_LINES = 9
-/** Heads the alert screen. Checked in the simulator (docs/BUILD_LOG.md §18); swap for '/!\' if a
- *  display ever shows a box instead. */
-export const RISK_GLYPH = '▲' // "▲"
 const BODY_LINES = MAX_LINES - 3 // header + separator + footer are always shown
-const SEPARATOR = '-'.repeat(40)
+
+/** The few non-ASCII glyphs Tripwire draws, and their ASCII fallbacks.
+ *  - unicode: GLYPHS=unicode in the backend .env (the default)
+ *  - ascii:   GLYPHS=ascii, for a display that shows boxes instead of the glyphs
+ *  - legacy:  frames without the field (older backend): exactly the Day-2 look
+ *  `live` is the dot after TESTNET while data is fresh ('' = no dot). */
+export const GLYPH_SETS = {
+  unicode: { risk: '▲', rule: '━'.repeat(20), live: '●', allowed: '▲━●' },
+  ascii: { risk: '/!\\', rule: '-'.repeat(40), live: '*', allowed: '' },
+  legacy: { risk: '▲', rule: '-'.repeat(40), live: '', allowed: '▲' },
+} as const
+export type GlyphSet = (typeof GLYPH_SETS)[keyof typeof GLYPH_SETS]
+/** Heads the alert screen (Day 2 name; checked in the simulator, docs/BUILD_LOG.md §20). */
+export const RISK_GLYPH = GLYPH_SETS.unicode.risk
+/** No frame for this long, or prices this old -> STALE on the glasses (Day 3 §26). */
+export const STALE_MS = 3_000
+const RECONNECT_HINT_MS = 8_000 // = link.ts WATCHDOG_MS: it drops a silent socket after this long
 export const FOOTERS: Record<UiMode | 'link' | 'watch', string> = {
   hud: 'tap: menu  swipe: next  hold: talk  2x: end',
   menu: 'tap: select  swipe: move  2x: back',
@@ -54,8 +67,6 @@ export interface HudInput {
   /** ms since the last frame arrived (undefined if none yet) */
   frameAgeMs?: number
 }
-
-const STALE_FRAME_MS = 15_000
 
 // --- number formatting ---------------------------------------------------------------------------
 
@@ -108,9 +119,25 @@ export function fmtClock(d: Date): string {
 
 // --- lines ---------------------------------------------------------------------------------------
 
-/** `tag` marks a special mode next to the name, e.g. "WATCH" (read-only, someone else's account). */
-export function headerLine(now: Date, tag = ''): string {
-  return `TRIPWIRE${tag ? ` ${tag}` : ''}`.padEnd(20) + 'TESTNET'.padEnd(13) + fmtClock(now)
+/** `tag` marks a special mode next to the name, e.g. "WATCH" (read-only, someone else's account).
+ *  `dot` follows TESTNET: the live glyph while data is fresh, "!" when it is stale. */
+export function headerLine(now: Date, tag = '', dot = ''): string {
+  const net = dot ? `TESTNET ${dot}` : 'TESTNET'
+  return `TRIPWIRE${tag ? ` ${tag}` : ''}`.padEnd(20) + net.padEnd(13) + fmtClock(now)
+}
+
+export function glyphSet(frame: HudFrame | null): GlyphSet {
+  const g = frame?.glyphs
+  return g === 'unicode' ? GLYPH_SETS.unicode : g === 'ascii' ? GLYPH_SETS.ascii : GLYPH_SETS.legacy
+}
+
+/** How stale the screen is, or null when fresh: the link first (no frame from the backend; it
+ *  sends one at least every second), then the prices inside the last frame. */
+export function staleness(f: HudFrame, frameAgeMs = 0): { what: 'link' | 'prices'; s: number } | null {
+  if (frameAgeMs > STALE_MS) return { what: 'link', s: Math.round(frameAgeMs / 1000) }
+  if (!f.feed.connected || f.feed.age_ms === null) return null // the feed line says so already
+  const age = f.feed.age_ms + frameAgeMs
+  return age > STALE_MS ? { what: 'prices', s: Math.round(age / 1000) } : null
 }
 
 function positionLines(p: Position, index: number, count: number): string[] {
@@ -141,10 +168,13 @@ function referenceLines(f: HudFrame): string[] {
 }
 
 function feedLine(f: HudFrame, frameAgeMs: number | undefined): string | null {
-  if (frameAgeMs !== undefined && frameAgeMs > STALE_FRAME_MS) {
-    return `Link stale ${Math.round(frameAgeMs / 1000)}s - reconnecting`
+  const stale = staleness(f, frameAgeMs)
+  if (stale?.what === 'link') {
+    const hint = (frameAgeMs ?? 0) >= RECONNECT_HINT_MS ? ' - reconnecting' : ''
+    return `STALE: no update for ${stale.s}s${hint}`
   }
   if (!f.feed.connected) return 'Hyperliquid feed reconnecting...'
+  if (stale?.what === 'prices') return `STALE: prices ${stale.s}s old`
   return null
 }
 
@@ -161,11 +191,11 @@ function slInfoLine(f: HudFrame, ui: MenuScreen): string {
   return p ? `SL now ${now}  entry ${fmtCompact(p.entry)}  mark ${fmtCompact(p.mark)}` : `SL now ${now}`
 }
 
-function alertLines(ui: MenuScreen): string[] {
+function alertLines(ui: MenuScreen, g: GlyphSet): string[] {
   const a = ui.alert
-  if (!a) return [`${RISK_GLYPH} RISK  ${ui.coin}-PERP`]
+  if (!a) return [`${g.risk} RISK  ${ui.coin}-PERP`]
   return [
-    `${RISK_GLYPH} RISK  ${a.coin}-PERP ${a.side} ${fmtSize(a.size)}`,
+    `${g.risk} RISK  ${a.coin}-PERP ${a.side} ${fmtSize(a.size)}`,
     `Liq ${fmtCompact(a.liq_px)}  ${a.liq_dist_pct.toFixed(1)}% from mark (<${a.threshold_pct}%)`,
   ]
 }
@@ -191,7 +221,7 @@ function menuLines(f: HudFrame, ui: MenuScreen): string[] {
     ui.kind === 'draft'
       ? draftLines(ui)
       : ui.kind === 'alert'
-        ? alertLines(ui)
+        ? alertLines(ui, glyphSet(f))
         : ui.kind === 'sl'
           ? [`MOVE SL  ${tag}`, slInfoLine(f, ui)]
           : [`ACTIONS  ${tag}  reduce-only`]
@@ -392,8 +422,10 @@ export function renderHud({ frame, link, now, frameAgeMs, listening = false }: H
   }
   const tag = headerTag(frame, link)
   const footer = link.kind !== 'open' ? FOOTERS.link : tag === 'WATCH' && mode === 'hud' ? FOOTERS.watch : FOOTERS[mode]
-  const lines = [mic ?? headerLine(now, tag), ...body.slice(0, BODY_LINES), SEPARATOR, footer]
-  return lines.map(fit).join('\n')
+  const g = glyphSet(frame)
+  const dot = open && frame && g.live ? (staleness(frame, frameAgeMs) ? '!' : g.live) : ''
+  const lines = [mic ?? headerLine(now, tag, dot), ...body.slice(0, BODY_LINES), g.rule, footer]
+  return lines.map((l) => fit(l, g.allowed)).join('\n')
 }
 
 /** Word-wrap to `width` columns (long words are hard-split). */
@@ -419,9 +451,9 @@ export function wrap(text: string, width: number): string[] {
   return out
 }
 
-/** Last line of defence: strip non-ASCII and truncate to MAX_COLS. */
-export function fit(line: string): string {
-  // eslint-disable-next-line no-control-regex
-  const ascii = line.replace(/[^\x20-\x7E▲]/g, '?') // printable ASCII + RISK_GLYPH only
+/** Last line of defence: printable ASCII plus the `allowed` glyphs only (anything else becomes
+ *  '?'), at most MAX_COLS. The default keeps the Day-2 rule: ASCII + RISK_GLYPH. */
+export function fit(line: string, allowed: string = GLYPH_SETS.legacy.allowed): string {
+  const ascii = Array.from(line, (ch) => ((ch >= ' ' && ch <= '~') || allowed.includes(ch) ? ch : '?')).join('')
   return ascii.length <= MAX_COLS ? ascii : ascii.slice(0, MAX_COLS - 1) + '~'
 }

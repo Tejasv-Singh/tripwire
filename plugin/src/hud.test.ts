@@ -1,10 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   FOOTERS,
+  GLYPH_SETS,
   MAX_COLS,
   MAX_LINES,
+  STALE_MS,
   currentMode,
   fit,
+  glyphSet,
+  staleness,
   fmtCompact,
   fmtLive,
   fmtPct,
@@ -134,7 +138,7 @@ describe('renderHud', () => {
     })
     expect(feedDown).toContain('Hyperliquid feed reconnecting...')
     const stale = renderHud({ frame: frame(), link: { kind: 'open' }, now: NOW, frameAgeMs: 20_000 })
-    expect(stale).toContain('Link stale 20s')
+    expect(stale).toContain('STALE: no update for 20s - reconnecting')
     const views: LinkView[] = [
       { kind: 'unconfigured' }, { kind: 'no-code' }, { kind: 'connecting', attempt: 1 },
       { kind: 'connecting', attempt: 4 }, { kind: 'retrying', inSeconds: 8 },
@@ -160,6 +164,84 @@ describe('renderHud', () => {
       now: NOW,
     })
     assertFits(text)
+  })
+})
+
+describe('stale indicator and glyph sets (Day 3)', () => {
+  const pos = { account: true, position: ethLong, view: { index: 0, count: 1 } }
+
+  it('flags no update for >3 s, and says reconnecting once the watchdog kicks in', () => {
+    const fresh = frame({ ...pos, feed: { connected: true, age_ms: 0 } })
+    const at = (ms: number) => renderHud({ frame: fresh, link: { kind: 'open' }, now: NOW, frameAgeMs: ms })
+    expect(at(900)).not.toContain('STALE')
+    expect(at(3_000)).not.toContain('STALE') // exactly 3 s is still fresh
+    expect(at(3_400)).toContain('STALE: no update for 3s')
+    expect(at(3_400)).not.toContain('reconnecting')
+    expect(at(9_000)).toContain('STALE: no update for 9s - reconnecting')
+    for (const ms of [3_400, 9_000, 600_000]) assertFits(at(ms))
+  })
+
+  it('flags old prices inside a fresh frame (feed age + frame age)', () => {
+    const at = (age: number, frameAgeMs = 0) =>
+      renderHud({ frame: frame({ ...pos, feed: { connected: true, age_ms: age } }), link: { kind: 'open' }, now: NOW, frameAgeMs })
+    expect(at(2_500)).not.toContain('STALE')
+    expect(at(2_500, 900)).toContain('STALE: prices 3s old')
+    expect(at(12_000)).toContain('STALE: prices 12s old')
+    // feed down: the reconnecting line, not a second STALE line
+    const down = renderHud({ frame: frame({ feed: { connected: false, age_ms: 40_000 } }), link: { kind: 'open' }, now: NOW })
+    expect(down).toContain('Hyperliquid feed reconnecting...')
+    expect(down).not.toContain('STALE')
+  })
+
+  it('unicode: live dot, heavy rule and the RISK triangle; ! when stale', () => {
+    const f = frame({ ...pos, glyphs: 'unicode' })
+    const lines = renderHud({ frame: f, link: { kind: 'open' }, now: NOW }).split('\n')
+    expect(lines[0]).toBe('TRIPWIRE            TESTNET ●    09:05')
+    expect(lines.at(-2)).toBe(GLYPH_SETS.unicode.rule)
+    expect(lines.at(-2)).toMatch(/^━+$/)
+    const stale = renderHud({ frame: f, link: { kind: 'open' }, now: NOW, frameAgeMs: 5_000 }).split('\n')
+    expect(stale[0]).toBe('TRIPWIRE            TESTNET !    09:05')
+    const alert: UiState = {
+      mode: 'menu', kind: 'alert', coin: 'ETH', items: ['Move SL'], cursor: 0, trading: true, note: null,
+      alert: { coin: 'ETH', side: 'LONG', size: 0.5, liq_px: 2980, liq_dist_pct: 3.87, mark: 3100, threshold_pct: 5 },
+    }
+    const risk = renderHud({ frame: frame({ ...pos, glyphs: 'unicode', ui: alert }), link: { kind: 'open' }, now: NOW })
+    expect(risk.split('\n')[1]).toBe('▲ RISK  ETH-PERP LONG 0.50')
+    for (const l of risk.split('\n')) expect(l).toMatch(/^[\x20-\x7E▲━●]*$/)
+  })
+
+  it('ascii: the same screens with /!\\ - * only (GLYPHS=ascii)', () => {
+    const f = frame({ ...pos, glyphs: 'ascii' })
+    const text = renderHud({ frame: f, link: { kind: 'open' }, now: NOW })
+    const lines = text.split('\n')
+    expect(lines[0]).toBe('TRIPWIRE            TESTNET *    09:05')
+    expect(lines.at(-2)).toBe('-'.repeat(40))
+    for (const l of lines) expect(l).toMatch(/^[\x20-\x7E]*$/)
+    const alert: UiState = {
+      mode: 'menu', kind: 'alert', coin: 'ETH', items: ['Move SL'], cursor: 0, trading: true, note: null,
+      alert: { coin: 'ETH', side: 'LONG', size: 0.5, liq_px: 2980, liq_dist_pct: 3.87, mark: 3100, threshold_pct: 5 },
+    }
+    const risk = renderHud({ frame: frame({ ...pos, glyphs: 'ascii', ui: alert }), link: { kind: 'open' }, now: NOW })
+    expect(risk.split('\n')[1]).toBe('/!\\ RISK  ETH-PERP LONG 0.50')
+    // a unicode glyph smuggled into a line is replaced in ascii mode
+    expect(fit('x ● y', GLYPH_SETS.ascii.allowed)).toBe('x ? y')
+  })
+
+  it('no glyphs field (older backend): exactly the Day-2 look, no dot; link down: no dot', () => {
+    expect(glyphSet(frame())).toBe(GLYPH_SETS.legacy)
+    const lines = renderHud({ frame: frame(pos), link: { kind: 'open' }, now: NOW }).split('\n')
+    expect(lines[0]).toBe(headerLine(NOW))
+    const down = renderHud({ frame: frame({ ...pos, glyphs: 'unicode' }), link: { kind: 'retrying', inSeconds: 2 }, now: NOW })
+    expect(down.split('\n')[0]).toBe(headerLine(NOW))
+  })
+
+  it('staleness() prefers the link, ignores a feed that says it is down', () => {
+    expect(staleness(frame(), 0)).toBeNull()
+    expect(staleness(frame(), 4_000)).toEqual({ what: 'link', s: 4 })
+    expect(staleness(frame({ feed: { connected: true, age_ms: 5_000 } }))).toEqual({ what: 'prices', s: 5 })
+    expect(staleness(frame({ feed: { connected: false, age_ms: 50_000 } }))).toBeNull()
+    expect(staleness(frame({ feed: { connected: true, age_ms: null } }))).toBeNull()
+    expect(STALE_MS).toBe(3_000)
   })
 })
 

@@ -23,6 +23,7 @@ from tripwire.exchanges.base import ExchangeAdapter
 from tripwire.exchanges.hyperliquid import HyperliquidAdapter
 from tripwire.hl.feed import HyperliquidFeed
 from tripwire.inbox import Inbox, ReplyTarget
+from tripwire.latency import LatencyStats
 from tripwire.orders import OrderService
 from tripwire.policy import Decision, KillSwitch, PolicyGuard, PolicyLimits
 from tripwire.replies import ReplyDrafter
@@ -145,7 +146,7 @@ def create_app(
     run_feed: bool = True,
     run_bot: bool = True,
     min_interval_s: float = 0.5,
-    heartbeat_s: float = 5.0,
+    heartbeat_s: float = 1.0,
     make_adapter: Callable[[MarketState], ExchangeAdapter] | None = None,
     voice_engine: VoiceEngine | None = None,
     audio_override: Callable[[], bytes | None] | None = None,
@@ -251,8 +252,10 @@ def create_app(
     async def send_reply(target: ReplyTarget, text: str) -> bool:
         return await bot.send_business_reply(target.connection_id, target.chat_id, text)
 
+    latency = LatencyStats()
+
     def status_text() -> str:
-        return format_status(state, adapter, guard, alerts)
+        return format_status(state, adapter, guard, alerts) + "\n" + latency.line()
 
     voice = voice_engine or VoiceEngine(
         enabled=settings.voice_enabled,
@@ -332,6 +335,8 @@ def create_app(
             audio_override=audio_override,
             sessions=sessions,
             post_journal=post_journal,
+            latency=latency,
+            glyphs=settings.glyphs,
             min_interval_s=min_interval_s,
             heartbeat_s=heartbeat_s,
         )
@@ -363,6 +368,7 @@ def create_app(
             "policy": guard.status(),
             "voice": {"status": voice.status, "detail": voice.detail},
             "session": sessions.snapshot().to_ui(),
+            "latency": latency.summary(),
             "alerts": {
                 **alerts.engine.status(asyncio.get_running_loop().time()),
                 "last": alerts.last_delivery,
@@ -382,6 +388,7 @@ def create_app(
     app.state.voice = voice
     app.state.sessions = sessions
     app.state.bot = bot
+    app.state.latency = latency
     app.state.replier = replier
     app.state.kill_switch = kill_switch
     return app

@@ -31,6 +31,9 @@ class MarketState:
         self.connected = False
         self.last_msg_at: float | None = None  # time.monotonic() of last WS message (any channel)
         self.version = 0
+        self.last_change_ms: int | None = (
+            None  # wall ms of the last change the HUD shows (latency.py)
+        )
         self._listeners: set[Listener] = set()
 
     # --- listeners -----------------------------------------------------------------------------
@@ -46,6 +49,7 @@ class MarketState:
 
     def _changed(self) -> None:
         self.version += 1
+        self.last_change_ms = int(time.time() * 1000)
         for fn in list(self._listeners):
             fn()
 

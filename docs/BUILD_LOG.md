@@ -1440,3 +1440,75 @@ polling, so no conflict with the real backend). Posts are visible at `GET /demo/
   - Without `JOURNAL_CHAT_ID`, the screen says why.
 - Plugin: **46 tests**: End / summary rendering, double tap → back online / exit offline / exit
   on end and summary, the new footers.
+
+### 26. Robustness: re-arm on foreground, STALE indicator, render latency, glyph fallback (item 4)
+
+**Re-arm on `FOREGROUND_ENTER`** (`main.ts`):
+- `link.reconnectNow()` (a fresh socket, so a phone that slept with a half-dead socket recovers
+  at once) and `ptt.reset()` (mic off, push-to-talk idle and ready). This part landed with §24.
+- **New:** whenever the link leaves `open`, `ptt.reset()` runs too, so the mic never keeps
+  streaming into a dead socket.
+
+**STALE indicator (> 3 s):**
+- The backend now sends a `hud` frame **at least every 1 s** (`HEARTBEAT_S` 5 → 1). Silence
+  for 3 s therefore really means something is wrong.
+- The plugin re-renders every **1 s** (`CLOCK_TICK_MS` 10 s → 1 s). This is free when nothing
+  changed, because `glasses.ts` never re-sends identical text.
+- `hud.ts staleness()`:
+  - **No frame for > 3 s:** `STALE: no update for 5s`. From 8 s on it adds ` - reconnecting`,
+    because the link watchdog (`WATCHDOG_MS`, 15 s → 8 s) then drops the socket.
+  - **Fresh frames but old prices** (`feed.age_ms` + frame age > 3 s):
+    `STALE: prices 4s old`.
+  - **Feed down:** the existing `Hyperliquid feed reconnecting...` line, not a second warning.
+- **Header dot** after TESTNET: `●` (or `*`) while fresh, `!` when stale.
+- Replaces the Day-1 `Link stale 20s - reconnecting` line, which only appeared after 15 s.
+
+**End-to-end latency (exchange event → render ack):**
+- **t0** `MarketState.last_change_ms`: the backend's wall clock when a Hyperliquid message
+  changed the state. Hyperliquid's `activeAssetCtx` has no server timestamp, so receive time is
+  the event time. Every `hud` frame carries it as **`src_ms`**.
+- **t1:** after `textContainerUpgrade` for that frame's text returns `ok`, the plugin sends
+  `{"type":"rendered","seq":N,"src_ms":t0}`. The backend notes the arrival time.
+- **Both ends are measured on the backend clock**, so phone/laptop clock skew can't distort it.
+  The figure includes:
+  - the 500 ms throttle
+  - the hop to the phone
+  - the BLE render
+  - the ack's trip back
+- Each `src_ms` is acked at most once. A frame whose text never reaches the display (identical,
+  or overtaken by a newer frame) gets no ack. Values outside 0–60 s are dropped as implausible.
+- `latency.py LatencyStats` keeps a window of 500. `/status` ends with
+  `Latency (HL event -> glasses render): p50 X ms, p95 Y ms (n=N)`, and `/healthz → latency` has
+  `{n, p50_ms, p95_ms, max_ms}`.
+- Plugin wiring: `GlassesDisplay(bridge, log, onRendered)`. `render(beforeShow)` records the text
+  of a frame with a new `src_ms` *before* it is queued, so the ack can't race the BLE write.
+
+**Glyph fallback (`GLYPHS` in `.env`):**
+
+| Set | When | Risk | Rule (above the footer) | Live dot |
+|---|---|---|---|---|
+| `unicode` | `GLYPHS=unicode` (default) | `▲` | `━` × 20 | `●` |
+| `ascii` | `GLYPHS=ascii`, if a display shows boxes | `/!\` | `-` × 40 | `*` |
+| legacy | frame without `glyphs` (older backend) | `▲` | `-` × 40 | none |
+
+- The `hello` and `hud` frames carry `glyphs`.
+- `fit(line, allowed)` turns any non-ASCII character outside the active set into `?`, so a stray
+  `●` can never reach the glasses in ascii mode.
+- The legacy set keeps every Day-2 screen test byte-identical.
+- Whether `━` and `●` render, and how wide 20 `━` are on the G2 font, is checked in the exit check
+  (§27).
+
+**Checks:**
+- **400 backend tests pass** (+8, new `test_latency.py`):
+  - percentiles, the implausible-ack filter, the window
+  - over `/ws`: `hello.heartbeat_ms == 1000`, `glyphs`, `src_ms` in range, the ack → `/healthz`
+    `latency.n == 1`, and a 120 s-old ack ignored
+  - a malformed `rendered` → `bad_message`, with the connection kept
+  - the `/status` last line; `GLYPHS=emoji` refused
+- **Plugin: 52 tests** (+6):
+  - the 3 s / 8 s thresholds (exactly 3 s is still fresh)
+  - prices-old vs link-silent, with no double warning when the feed is down
+  - the unicode / ascii / legacy headers, rules and alert glyph, including the ascii scrub
+  - `staleness()` edge cases
+- ruff, mypy and tsc are clean; `npm run build` OK. (The plugin has never had an ESLint config;
+  `npx eslint` only reports that.)

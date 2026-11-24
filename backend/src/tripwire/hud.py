@@ -57,6 +57,7 @@ def build_hud_frame(
     trading: dict[str, Any] | None = None,
     inbox: dict[str, Any] | None = None,
     voice: dict[str, Any] | None = None,
+    glyphs: str = "unicode",
     now_ms: int | None = None,
     now_mono: float | None = None,
 ) -> dict[str, Any]:
@@ -96,4 +97,7 @@ def build_hud_frame(
         "inbox": inbox,
         # push-to-talk line: {"state": listening|transcribing|heard|error, "text", "note"} or null
         "voice": voice,
+        # wall ms when the exchange data shown here arrived; the plugin echoes it after rendering
+        "src_ms": state.last_change_ms,
+        "glyphs": glyphs,  # "unicode" (▲ ━ ●) or "ascii" (/!\ - *): GLYPHS in .env
     }

@@ -23,8 +23,9 @@ export interface LinkOptions {
 
 const BACKOFF_START_MS = 1_000
 const BACKOFF_MAX_MS = 15_000
-/** No frame for this long (backend heartbeats every 5 s) -> assume the socket is dead. */
-const WATCHDOG_MS = 15_000
+/** No frame for this long (backend heartbeats every 1 s since Day 3) -> assume the socket is dead.
+ *  The HUD shows STALE after 3 s and adds "reconnecting" from this point (hud.ts RECONNECT_HINT_MS). */
+export const WATCHDOG_MS = 8_000
 
 export class BackendLink {
   private ws: WebSocket | null = null
