@@ -28,11 +28,15 @@ class MarketState:
         self.marks: dict[str, float] = {}
         self.asset_positions: list[Any] = []
         self.positions: list[Position] = []
+        # True once the account's positions arrived at least once (clearinghouseState snapshot,
+        # or an adapter that seeds them). Until then `positions == []` means "not known yet",
+        # not "flat" (session.py waits for it before taking its uPnL baseline).
+        self.positions_loaded = not account
         self.connected = False
         self.last_msg_at: float | None = None  # time.monotonic() of last WS message (any channel)
         self.version = 0
         self.last_change_ms: int | None = (
-            None  # wall ms of the last change the HUD shows (latency.py)
+            None  # wall ms of the last HUD-visible change (latency.py)
         )
         self._listeners: set[Listener] = set()
 
@@ -126,6 +130,7 @@ class MarketState:
     def update_clearinghouse(self, ch_state: Mapping[str, Any]) -> bool:
         aps = ch_state.get("assetPositions")
         self.asset_positions = list(aps) if isinstance(aps, list) else []
+        self.positions_loaded = True
         changed = self._recompute_positions()
         if changed:
             self._changed()

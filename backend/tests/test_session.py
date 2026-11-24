@@ -67,6 +67,58 @@ def test_session_pnl_and_max_drawdown_ignore_the_starting_unrealized() -> None:
     assert t.session_pnl == pytest.approx(-5.0)
 
 
+def test_baseline_waits_for_the_first_positions_snapshot() -> None:
+    """Regression (exit check §28): the backend starts before the feed has delivered the watched
+    account, so `positions == []` at startup means unknown. The position's existing uPnL must
+    become the baseline, not this session's P&L."""
+    from tripwire.session import SessionService
+
+    watched = "0x" + "ab" * 20
+    state = MarketState(account=watched, watch=True)
+    assert state.positions_loaded is False
+    svc = SessionService(state, FakeAdapter(MarketState()))
+    assert svc.snapshot().session_pnl == 0.0  # nothing known yet: nothing counted
+    row = {**ETH_ROW, "entryPx": "1800.0"}  # mid 1650 below -> uPnL -75 on 0.5 ETH
+    apply_ws_message(state, {"channel": "allMids", "data": {"mids": {"ETH": "1650"}}})
+    ch = {"assetPositions": [{"position": row}]}
+    apply_ws_message(
+        state,
+        {"channel": "clearinghouseState", "data": {"user": watched, "clearinghouseState": ch}},
+    )
+    assert state.positions_loaded and state.positions[0].upnl == pytest.approx(-75.0)
+    s = svc.snapshot()
+    assert s.session_pnl == pytest.approx(0.0) and s.max_drawdown == 0.0
+    assert s.unrealized == pytest.approx(-75.0)  # shown as "uPnL now", just not as session P&L
+    apply_ws_message(state, {"channel": "allMids", "data": {"mids": {"ETH": "1640"}}})
+    assert svc.snapshot().session_pnl == pytest.approx(-5.0)  # only what moved since
+
+
+def test_baseline_also_waits_for_a_live_mid() -> None:
+    from tripwire.session import SessionService
+
+    watched = "0x" + "ef" * 20
+    state = MarketState(account=watched, watch=True)
+    svc = SessionService(state, FakeAdapter(MarketState()))
+    ch = {"assetPositions": [{"position": {**ETH_ROW, "entryPx": "1800.0"}}]}
+    apply_ws_message(
+        state,
+        {"channel": "clearinghouseState", "data": {"user": watched, "clearinghouseState": ch}},
+    )
+    # no mid yet: uPnL is priced off positionValue (1747.2 / 0.5 = 3494.4) -> not a baseline
+    assert svc.snapshot().session_pnl == 0.0
+    apply_ws_message(state, {"channel": "allMids", "data": {"mids": {"ETH": "1650"}}})
+    assert svc.snapshot().session_pnl == pytest.approx(0.0)  # baseline taken on the live mid
+    apply_ws_message(state, {"channel": "allMids", "data": {"mids": {"ETH": "1660"}}})
+    assert svc.snapshot().session_pnl == pytest.approx(5.0)
+
+
+def test_price_only_and_fake_adapter_have_a_baseline_at_once() -> None:
+    assert MarketState().positions_loaded is True  # no account: flat is known
+    state = MarketState(account="0x" + "cd" * 20)
+    FakeAdapter(state, [ETH_ROW])  # seeds positions via update_clearinghouse
+    assert state.positions_loaded is True
+
+
 def test_end_starts_a_fresh_session_from_the_current_unrealized() -> None:
     clock = Clock()
     t = SessionTracker(clock_ms=clock)
@@ -224,10 +276,19 @@ def test_trade_then_end_session_then_post(
         time.sleep(0.35)
         ws.send_json({"type": "intent", "action": "tap"})
         assert recv(ws, "order")["status"] == "filled"
-        ws.send_json({"type": "intent", "action": "back"})  # result -> hud
-        recv(ws, "ack")
-        ws.send_json({"type": "intent", "action": "back"})  # double tap on the HUD
-        assert recv(ws, "ack")["mode"] == "end"
+
+        def back_ack() -> dict[str, Any]:
+            # the fake fills instantly, so the confirming tap's own ack can arrive after the
+            # order frame: skip it, or every later ack is read one step behind (flaky in CI)
+            ws.send_json({"type": "intent", "action": "back"})
+            for _ in range(10):
+                ack = recv(ws, "ack")
+                if ack["action"] == "back":
+                    return ack
+            raise AssertionError("no ack for back")
+
+        assert back_ack()["mode"] == "hud"  # result -> hud
+        assert back_ack()["mode"] == "end"  # double tap on the HUD
         live = recv(ws, "hud", mode="end")["ui"]["summary"]
         assert live["trades"] == 1 and live["ended_ms"] is None
         ws.send_json({"type": "intent", "action": "tap"})  # end it

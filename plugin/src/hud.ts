@@ -27,7 +27,8 @@ const BODY_LINES = MAX_LINES - 3 // header + separator + footer are always shown
  *  - legacy:  frames without the field (older backend): exactly the Day-2 look
  *  `live` is the dot after TESTNET while data is fresh ('' = no dot). */
 export const GLYPH_SETS = {
-  unicode: { risk: '▲', rule: '━'.repeat(20), live: '●', allowed: '▲━●' },
+  // 26 x ━ ≈ 520 of 576 px on the simulator's G2 font (20 only reached ~400, BUILD_LOG §28)
+  unicode: { risk: '▲', rule: '━'.repeat(26), live: '●', allowed: '▲━●' },
   ascii: { risk: '/!\\', rule: '-'.repeat(40), live: '*', allowed: '' },
   legacy: { risk: '▲', rule: '-'.repeat(40), live: '', allowed: '▲' },
 } as const
@@ -413,7 +414,10 @@ export function renderHud({ frame, link, now, frameAgeMs, listening = false }: H
   const open = link.kind === 'open'
   const mic = open ? voiceHeader(frame, listening) : null
   if (open && frame) {
-    if (mic && frame.voice?.state === 'heard' && frame.voice.note) body.push(frame.voice.note)
+    const note = frame.voice?.state === 'heard' ? frame.voice.note : null
+    // a voice command that ended on a result (e.g. BLOCKED watch only) already shows that text
+    const repeated = frame.ui?.mode === 'result' && frame.ui.message === note
+    if (mic && note && !repeated) body.push(note)
     body.push(...screenLines(frame))
     const feed = feedLine(frame, frameAgeMs)
     if (feed) body.push(feed)

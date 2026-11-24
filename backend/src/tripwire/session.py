@@ -221,10 +221,31 @@ class SessionService:
         self._mode = mode or (lambda: state.mode)
         self.tracker = tracker or SessionTracker()
         self._realized_at = 0.0
-        self.tracker.unrealized_start = self.unrealized_now()
+        self._baseline_set = False
+        self._take_baseline()
 
     def unrealized_now(self) -> float:
         return sum(p.upnl for p in self.state.positions)
+
+    def _take_baseline(self) -> bool:
+        """The session counts only the uPnL that changes *during* it, so its baseline is the uPnL
+        of the positions open at the start. At startup the feed hasn't delivered them yet
+        (`positions == []` means unknown, not flat). Without this wait, a watched position's whole
+        uPnL counted as this session's P&L (exit check §28: -$75 seconds after start)."""
+        if self._baseline_set:
+            return True
+        if not self.state.positions_loaded:
+            return False
+        if any(p.coin not in self.state.mids for p in self.state.positions):
+            return False  # uPnL would be priced off positionValue, then jump when the mid lands
+        self.tracker.unrealized_start = self.tracker.unrealized = self.unrealized_now()
+        self.tracker.peak = self.tracker.max_drawdown = 0.0
+        self._baseline_set = True
+        return True
+
+    def _unrealized_sample(self) -> float:
+        # before the baseline exists the session P&L from open positions is 0 by definition
+        return self.unrealized_now() if self._take_baseline() else self.tracker.unrealized_start
 
     async def refresh(self, *, force: bool = False) -> None:
         realized: float | None = None
@@ -235,10 +256,10 @@ class SessionService:
                 realized = await self.adapter.realized_pnl_since(self.tracker.started_ms)
             except Exception as exc:  # keep the last value; the summary says "realized" anyway
                 log.warning("session realized P&L refresh failed: %s", exc)
-        self.tracker.sample(self.unrealized_now(), realized)
+        self.tracker.sample(self._unrealized_sample(), realized)
 
     def snapshot(self) -> SessionSummary:
-        self.tracker.sample(self.unrealized_now())
+        self.tracker.sample(self._unrealized_sample())
         return self.tracker.snapshot(self._mode())
 
     async def end(self) -> SessionSummary:

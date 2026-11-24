@@ -14,35 +14,42 @@ draft, checked against hard limits ($250, 5x, stop-loss required, daily loss loc
 Messages in your Telegram Business chats show up as one line on the HUD, and after a fill you can
 send a short drafted reply with one tap.
 
+**Hold** the temple and say *"close half"*, *"stop to breakeven"* or *"snooze"*. Speech is
+transcribed **locally** (faster-whisper, no cloud) and only **arms** the order; the second tap
+still sends it. A **double tap** ends the session and shows a summary (trades, realized and
+session P&L, max drawdown, alerts, policy blocks), which one more tap posts to your own Telegram
+journal channel. If no update arrives for 3 s, the glasses say **STALE**.
+
 Built for the **Heads Up** hackathon. Tracks: **Crypto & DeFi** and **Messaging**.
 
 ```
-TRIPWIRE            TESTNET      09:05
+TRIPWIRE            TESTNET ●    09:05
 ETH-PERP LONG 0.50 @ 3,412  5x
 uPnL +$41.20 (+2.4%)  ROE +12.1%
 Liq 2,980  12.7% away
-----------------------------------------
-tap: actions  swipe: next  2x: exit
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+tap: menu  swipe: next  hold: talk  2x: end
 ```
 
-Tap, pick "Close 50%", and tap again within 5 seconds:
+Tap, pick "Close 50%" (or hold and say "close half"), and tap again within 5 seconds:
 
 ```
-TRIPWIRE            TESTNET      09:05
+MIC "close half"
 CONFIRM  Close 50%  ETH-PERP LONG
 SELL 0.25 ETH  reduce-only IOC
 at ~3,494.4 mark, max 5% slippage
 Tap again within 5s to SEND.
-----------------------------------------
+━━━━━━━━━━━━━━━━━━━━━━━━━━
 tap: SEND  swipe/2x: cancel
 ```
 
-> **Status: Day 2 complete (no funded account needed).** Everything below runs and is tested end
-> to end in the simulator. The real-data parts are WATCH mode (any public testnet address) and
+> **Status: Day 3 complete; testnet funds pending.** Everything below runs and is tested end to
+> end in the simulator. The real-data parts are WATCH mode (any public testnet address) and
 > DRY_RUN (really signed testnet orders that are never sent). The order and stop-loss flows are
 > also shown on an in-memory fake exchange (`npm run backend:demo`). No order has been sent to
-> Hyperliquid yet, because that needs a funded testnet account and an approved agent key.
-> Screenshots: [docs/screenshots/day2/](docs/screenshots/day2/).
+> Hyperliquid yet: that needs funds and an approved agent key. When they arrive,
+> `npm run golive:check` and [docs/GO_LIVE.md](docs/GO_LIVE.md) take it live.
+> Screenshots: [day 2](docs/screenshots/day2/), [day 3](docs/screenshots/day3/).
 
 ## How it works
 
@@ -65,8 +72,16 @@ G2 glasses ◄─BLE─► Even App (phone) running plugin/ ──wss/https─�
   - `risk.py`: liquidation alerts.
   - `drafts.py`: the forward parser.
   - `inbox.py` and `replies.py`: Telegram Business.
-- **`docs/`**: [architecture](docs/architecture.md), [WebSocket protocol](docs/ws-protocol.md),
-  and the [build log](docs/BUILD_LOG.md) (every decision and deviation, with where each knob lives).
+  - `voice.py` and `voice_grammar.py`: local speech-to-text and the command grammar.
+  - `session.py`: the session summary and journal post.
+  - `latency.py`: exchange-event-to-render latency.
+  - `golive.py`: the go-live readiness check.
+- **`docs/`**:
+  - [architecture](docs/architecture.md) and the [WebSocket protocol](docs/ws-protocol.md)
+  - the [build log](docs/BUILD_LOG.md): every decision and deviation, with where each knob lives
+  - [GO_LIVE](docs/GO_LIVE.md): the first live testnet orders, step by step
+  - [DEMO](docs/DEMO.md): the 3-minute video storyboard and pre-recording checklist
+  - [FALLBACK_BYBIT](docs/FALLBACK_BYBIT.md): a plan only, for switching exchanges in under 2 h
 
 ## Setup
 
@@ -96,6 +111,11 @@ if you want to use real glasses.
      `ANTHROPIC_API_KEY` is not used.
    - The policy limits (`MAX_OPEN_NOTIONAL_USD`, `MAX_LEVERAGE`, `DAILY_LOSS_LIMIT_USD`,
      `KILL_SWITCH`) and the alert settings (`ALERT_LIQ_PCT`, ...) have safe defaults.
+   - `VOICE_ENABLED=true` (default). The first push-to-talk downloads the ~145 MB `base` model
+     once into `backend/data/models`; after that, nothing leaves the laptop.
+   - `JOURNAL_CHAT_ID` is optional: your channel for session summaries
+     (see [Telegram bot](#telegram-bot-optional)).
+   - `GLYPHS=unicode` (default) draws `▲ ━ ●`. Set `ascii` if a display shows boxes.
 3. **Configure the plugin.** Copy `plugin/.env.example` to `plugin/.env.local`. Set
    `VITE_BACKEND_URL` to your HTTPS backend origin, and `VITE_PAIRING_CODE` to the same value as
    `PAIRING_CODE`. The pairing code is only read in development builds.
@@ -115,8 +135,12 @@ if you want to use real glasses.
    npm run sim            # 4. Even Hub simulator pointed at the Vite server
    ```
    The simulated glasses show the live ETH mark price. It changes as testnet ETH moves, and the
-   clock in the header keeps ticking. In the simulator, swipe for next/prev and click (tap) for
-   the actions menu. Double-click exits from the HUD and backs out of any other screen.
+   clock in the header keeps ticking.
+   - In the simulator, swipe for next/prev and click (tap) for the actions menu.
+   - Long-press is push-to-talk: the simulator records from your PC's default microphone.
+   - Double-click on the HUD opens `End session?`. A second double-click there exits, and
+     double-click backs out of any other screen. With the backend unreachable, one double-click
+     exits.
 7. **Run on real glasses:** from `plugin/`, run `npx evenhub qr --url http://<your-LAN-IP>:5173`
    and scan the code with the Even App. The phone must be on the same Wi-Fi. To build an
    installable package, run `npm run plugin:pack` to produce `plugin/tripwire.ehpk`.
@@ -142,7 +166,12 @@ the feed, trading, policy, alert and bot status.
       to the bot)
     - `POST /demo/threshold {"pct": 20}`
     - `POST /demo/business {"name": "@alice", "text": "still in?"}`
-  - `npm run backend:demo -- --watch 0x...` does the same in WATCH mode.
+    - `POST /demo/voice {"wav_path": "C:/.../close_half.wav"}`: a 16 kHz mono WAV that
+      **replaces** the next push-to-talk's audio (for PCs without a virtual mic)
+    - `GET /demo/dms` and `GET /demo/journal`: what was sent to Telegram (the demo backend never
+      polls, so it can run next to the real one; it sends with the real token if one is set)
+  - WATCH mode: `npm run backend:demo -- --watch 0x...`. In PowerShell, `npm` swallows the
+    `--`, so run `uv --directory backend run python scripts/demo.py --watch 0x...` instead.
 
 ### Trading on testnet (optional)
 
@@ -156,6 +185,11 @@ withdraw.
    It is the agent key, not your main wallet key.
 3. In `.env`, set `HL_ACCOUNT_ADDRESS` to your **main** account address (not the agent's) and
    `HL_AGENT_KEY` to the agent's private key. Restart the backend.
+   - Run **`npm run golive:check`**. It checks the keys, that the agent is authorized, testnet
+     USDC > $20 and the testnet guard, and signs one $15 order (dry run) validated against the
+     SDK.
+   - It prints PASS / FAIL / SKIP and the exact next command.
+   - [docs/GO_LIVE.md](docs/GO_LIVE.md) is the full live sequence.
 4. **Dry run first.** With `DRY_RUN=true` (the default), the header says `TRIPWIRE DRY RUN`.
    Every confirmed order is built and signed exactly like a live one, logged, appended to
    `backend/data/dry_run_orders.jsonl`, and **not sent**. The result screen says `DRY RUN`.
@@ -167,13 +201,26 @@ withdraw.
 
 On the glasses:
 
-| Screen | Tap | Swipe | Double tap |
-|---|---|---|---|
-| HUD | open the actions menu | next / previous position | exit the app |
-| Menu (actions / Move SL / RISK alert / forwarded draft) | choose the item | move the cursor | back to the HUD |
-| Confirm | **send** (between 0.3 s and 5 s after choosing) | cancel, back to the menu | cancel, back to the HUD |
-| Result | back to the HUD (also after 8 s) | same | same |
-| Reply offer (after a fill) | send the reply | nothing | skip (also after 20 s) |
+| Screen | Tap | Swipe | Double tap | Hold (push-to-talk) |
+|---|---|---|---|---|
+| HUD | open the actions menu | next / previous position | **End session?** | a voice command |
+| Menu (actions / Move SL / RISK alert / forwarded draft) | choose the item | move the cursor | back to the HUD | a voice command |
+| Confirm | **send** (between 0.3 s and 5 s after choosing) | cancel, back to the menu | cancel, back to the HUD | only "cancel" |
+| Result | back to the HUD (also after 8 s) | same | same | — |
+| Reply offer (after a fill) | send the reply | nothing | skip (also after 20 s) | dictate a new reply ("cancel" skips) |
+| End session? (live numbers) | end it → summary | back to the HUD | exit the app | — |
+| Session summary | post to the journal channel | HUD | exit the app | — |
+
+**Voice commands** (hold, speak, release; up to 8 s):
+- The commands: `close quarter / half / all`, `stop to breakeven`, `stop tighter`, `snooze`,
+  `cancel`, `status`. Noisy transcripts are matched fuzzily ("clothes half" → close half).
+  Anything else answers `not a command`.
+- What was heard shows on the glasses for 2 s (`MIC "close half"`), then the normal confirm
+  screen.
+- Voice can't open positions and never sends by itself. In WATCH mode it answers
+  `BLOCKED  watch only`.
+- Hold, don't tap-then-hold. A long press right after a tap is ignored, because that gesture
+  opens the OS menu.
 
 - **Actions menu:** Close 25 % / 50 % / 100 % (reduce-only IOC at mid ± 5 %), or Move SL... →
   **SL to breakeven** (stop at entry) or **SL tighter 1 %** (the current stop moved 1 % of mark
@@ -202,12 +249,24 @@ On the glasses:
      still work. The setting survives restarts; `KILL_SWITCH=true` in `.env` can't be undone from
      Telegram.
    - `/threshold 8`: liquidation alerts at 8 % (shows the current value without a number).
+     **The value is saved and survives restarts.**
+   - `/summary`: the running session so far (the same numbers as the glasses' summary screen).
+   - `/status` ends with
+     `Latency (HL event -> glasses render): p50 … ms, p95 … ms`, measured while the glasses are
+     connected.
    - **Forward (or type) a trade idea**, e.g. `BTC long 96.5k sl 95k tp 99k`,
      `ETH short @3400 SL 3480 TP 3200 3x $200`. The bot answers with the parsed draft and the
      policy verdict, and the glasses show `FORWARDED - your instruction, not advice` with Place
      order / Discard (Discard only if blocked). Ambiguous text is refused with the reason
      (`which price is 95k? label it (sl / tp / @entry)`).
    - **Risk alerts:** with no glasses connected, an alert arrives as a DM.
+   - **Journal channel** for session summaries:
+     1. Create a channel (or group) of your own.
+     2. Add the bot as an **admin**. The bot DMs you the line to paste:
+        `JOURNAL_CHAT_ID=-100…`.
+     3. Put it in `.env` and restart.
+     4. Then double tap on the HUD → `End session?` → tap → tap posts the summary. The summary
+        has numbers only, ending "Numbers only - not advice."
 5. Connecting the bot to your other chats needs **Telegram Premium**:
    Settings → Telegram Business → Chatbots → `@your_bot` → pick the chats. The backend then logs
    `business_connection …`.
@@ -246,6 +305,11 @@ and never less than Telegram's `retry_after`. Only a rejected token stops it for
 | Result: `No reply in 25s - CHECK positions` | Hyperliquid didn't answer in time. The order **may still have gone through**, so check the position before you try again. |
 | `/healthz` shows `trading.status` = `error` | The backend couldn't load Hyperliquid's coin list at startup. `trading.detail` says why. The first close tries again. |
 | `evenhub-simulator` not found | `npm run sim` calls the simulator's `bin/index.js` directly. If you run it yourself, `npm rebuild @evenrealities/evenhub-simulator` restores the link. |
+| HUD shows `STALE: no update for 5s` and `!` instead of `●` | No frame from the backend for more than 3 s, although the socket looks open (phone asleep, network stall, backend frozen). From 8 s on it says `- reconnecting` and the plugin opens a fresh socket. `STALE: prices 5s old` means the backend is fine but its Hyperliquid feed is quiet. Check `/healthz → hyperliquid.last_msg_age_ms`. |
+| Voice: `MIC  voice unavailable` / `VOICE_ENABLED=false` | Voice is off in `.env`, or the model failed to load (see `/healthz → voice.detail`). The first load needs internet once, for the ~145 MB download. |
+| Voice: `MIC "..."` + `not a command` | It heard you but not a command. Say it as listed (`close half`, `stop to breakeven`...). Two commands at once are refused: "one command at a time". |
+| Glasses show boxes instead of `▲ ━ ●` | Set `GLYPHS=ascii` in `.env` and restart. The fallback is `/!\ - *`. |
+| Summary screen says `Not posted: JOURNAL_CHAT_ID not set in .env` (or a Telegram error) | Set `JOURNAL_CHAT_ID`, make the bot an **admin** of that channel, then restart. |
 
 ## Safety rules
 
@@ -299,8 +363,13 @@ Tests cover each one (`backend/tests/test_policy.py`, `test_actions.py`, `test_s
   memory, only for 10 minutes. Forwarded drafts are parsed in memory and only metadata is logged.
 - **Reply drafts** send OpenRouter only the trade facts ("closed half of my ETH long at about
   1,684.9"), never your chat's messages, names or ids. Without a key, nothing is sent anywhere.
-- **Only the owner** (`TELEGRAM_OWNER_ID`) can see `/status`, change the kill switch or threshold,
-  forward drafts, or receive alert DMs.
+- **Only the owner** (`TELEGRAM_OWNER_ID`) can see `/status` and `/summary`, change the kill
+  switch or threshold, forward drafts, or receive alert DMs.
+- **Voice stays on the laptop.** Audio is streamed only while you hold push-to-talk, transcribed
+  locally by faster-whisper, and then discarded. It is never stored or sent anywhere. Logs keep
+  the command label and the audio length, never dictated reply text.
+- **Journal posts** contain numbers only (times, trades, P&L, counts), and only to the channel
+  you set.
 
 ## What existed before Nov 23
 
@@ -327,6 +396,8 @@ that was changed from it.
 | [hyperliquid-python-sdk](https://github.com/hyperliquid-dex/hyperliquid-python-sdk) | 0.24.0 | MIT | testnet constants; signed orders later |
 | [websockets](https://websockets.readthedocs.io) | 17.4 | BSD-3-Clause | Hyperliquid WebSocket client |
 | [python-telegram-bot](https://python-telegram-bot.org) | 22.8 | LGPL-3.0 | Telegram Bot API |
+| [faster-whisper](https://github.com/SYSTRAN/faster-whisper) / [CTranslate2](https://github.com/OpenNMT/CTranslate2) | 1.2.1 / 4.9.1 | MIT / MIT | local speech-to-text (push-to-talk) |
+| [Whisper `base` model](https://huggingface.co/Systran/faster-whisper-base) (OpenAI Whisper, converted) | — | MIT | speech model, downloaded once |
 | [pytest](https://pytest.org), [Ruff](https://docs.astral.sh/ruff/), [mypy](https://mypy-lang.org), [HTTPX](https://www.python-httpx.org) | 9.2 / 0.17 / 2.4 / 0.28 | MIT / MIT / MIT / BSD-3-Clause | tests, lint, types |
 | [uv](https://docs.astral.sh/uv/) | — | MIT / Apache-2.0 | Python env and lockfile |
 | [ngrok](https://ngrok.com) | — | proprietary service | HTTPS tunnel to the laptop |

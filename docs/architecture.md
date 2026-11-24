@@ -23,6 +23,7 @@ and alerts.
  │   input.ts ◄── onEvenHubEvent (swipe / tap / lifecycle) ◄────┼──────┤ ring / temple touch               │
  │   link.ts  ── wss://<host>/ws?code=… ──┐                     │      └───────────────────────────────────┘
  │   api.ts   ── https://<host>/healthz ──┤ (ngrok-skip header) │
+ │   voice.ts ── hold = push-to-talk: mic PCM → binary WS frames│
  └────────────────────────────────────────┼─────────────────────┘
                                           │  HTTPS / WSS
                           ┌───────────────▼────────────────┐
@@ -32,9 +33,9 @@ and alerts.
  ┌─────────────────────────── laptop ─────┼───────────────────────────────────────────────┐
  │ backend/  FastAPI + uvicorn (Python 3.12, one asyncio event loop)                       │
  │   main.py   create_app(): testnet guard → state → feed task → bot → routes              │
- │   ws.py     /ws  (pairing, hud frames ≤ 2/s, heartbeats, intents → ActionFlow), ClientHub│
+ │   ws.py     /ws: pairing, frames ≤ 2/s + 1 s heartbeat, intents, voice, acks            │
  │   actions.py  per-client screens: hud → menu(actions|sl|alert|draft) → confirm →         │
- │               sending → result → reply                                                  │
+ │               sending → result → reply → end → summary (screen 6)                       │
  │   orders.py   Close/Stop/OpenOrder + OrderService.submit  ◄── THE only order path       │
  │   policy.py   PolicyGuard: reduce-only free; opens need SL, ≤$250, ≤5x, loss lock, kill  │
  │   exchanges/  ExchangeAdapter: hyperliquid.py (sign → POST /exchange or DRY_RUN log),    │
@@ -44,13 +45,18 @@ and alerts.
  │   inbox.py    business messages → HUD line (30 chars, memory only)                       │
  │   replies.py  ≤60-char reply drafts: OpenRouter (facts only) → template fallback         │
  │   trading.py  pure order helpers (rounding, reply parsing)                              │
+ │   voice.py    push-to-talk PCM → faster-whisper base, CPU int8, local only              │
+ │   voice_grammar.py  transcript → close 25/50/all, stop, snooze, cancel, status          │
+ │   session.py  SessionTracker: trades, realized/session P&L, drawdown → journal          │
+ │   latency.py  exchange event (src_ms) → render ack: p50 / p95 in /status                │
+ │   golive.py   npm run golive:check: keys, agent, funds, guard, $15 payload              │
  │   hud.py    MarketState + ui → JSON frame                                               │
  │   state.py  MarketState (mids, marks, positions, listeners; own / WATCH / price mode)   │
  │   hl/feed.py      ── wss://api.hyperliquid-testnet.xyz/ws ──► Hyperliquid TESTNET       │
  │   hl/positions.py pure math: uPnL, uPnL %, ROE, liq distance                            │
  │   telegram_bot.py ── long polling ──► api.telegram.org (Bot API): /start /status /kill  │
- │                   /unkill /threshold, drafts, business inbox, owner DMs                  │
- │   db.py     SQLite: business_connections, intent_log, order_log, kv (metadata only)     │
+ │                   /unkill /threshold /summary, drafts, inbox, DMs, journal              │
+ │   db.py     SQLite: business conns, intent/order logs, sessions, kv (no text)           │
  └─────────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -82,8 +88,23 @@ action they offer goes through the same two taps and the same `submit()`.
    every listener — one per connected glasses client (`ClientSession.wake`).
 4. Each client's sender task waits until ≥ 500 ms since its last frame, then builds one `hud`
    frame from the *current* state (so bursts collapse into one frame) and sends it.
-5. The plugin's `link.ts` parses it, `hud.ts` renders ≤ 9 × 46 ASCII text, `glasses.ts` pushes it
-   with `textContainerUpgrade` (one call in flight; newest text wins; unchanged text skipped).
+5. The plugin's `link.ts` parses it, `hud.ts` renders ≤ 9 × 46 characters of text (ASCII plus the
+   `▲ ━ ●` glyph set), and `glasses.ts` pushes it with `textContainerUpgrade`. One call is in
+   flight at a time, the newest text wins, and unchanged text is skipped.
+6. **Latency (Day 3):** the frame carries `src_ms`, the backend time the tick arrived. Once its
+   text is on the glasses, the plugin sends `{"type":"rendered","src_ms":…}` back.
+   `latency.py` keeps p50 / p95 of `now − src_ms`, measured on the backend clock only. In the
+   simulator exit check it was ~70–260 ms p50 and ~500–850 ms p95.
+
+With nothing changing, the backend still sends a frame **every 1 s** (heartbeat). The plugin
+re-renders every 1 s and shows `STALE` after 3 s without one (BUILD_LOG §26).
+
+**Voice (Day 3):**
+1. Hold → `{"type":"voice","action":"start"}`, then the mic's 16 kHz PCM as binary frames.
+2. Release → `stop`.
+3. `voice.py` transcribes locally (~1.7 s), and `voice_grammar.py` maps it to one command.
+4. `ActionFlow.voice()` runs it through the same `_select()` as a menu tap: it arms, the confirm
+   screen appears, and the tap still sends.
 
 Input goes the other way: `onEvenHubEvent` → `input.ts` → `{"type":"intent","action":…}` →
 `ws.py` hands it to that client's `ActionFlow`, logs it to SQLite, sends `ack` + a fresh frame.
@@ -98,8 +119,9 @@ Input goes the other way: `onEvenHubEvent` → `input.ts` → `{"type":"intent",
 ```
 
 - The **backend** owns this state machine (`actions.py`), one per WebSocket client. The plugin
-  draws `ui` from each frame and maps input by the current screen: double tap = exit on the HUD,
-  back everywhere else (`input.ts`).
+  draws `ui` from each frame and maps input by the current screen (`input.ts`).
+  - Double tap = `back` everywhere. On the HUD it opens `End session?` (Day 3).
+  - The plugin itself exits only on `end` / `summary`, or when the link is down.
 - Tap 1 only *arms*: it freezes the exact order (coin, side, size rounded down to `szDecimals`,
   mark at the time) and shows it. Tap 2 sends it, after re-checking that the position is still
   open on the same side and capping a partial close at the live size.
@@ -134,8 +156,11 @@ exists on the API — see `docs/BUILD_LOG.md` §0/§2.
 | Hop | Detection | Recovery |
 |---|---|---|
 | Backend ↔ Hyperliquid | socket error, or no message for 30 s | reconnect with 1 → 30 s backoff, resubscribe everything; HUD shows "Hyperliquid feed reconnecting..." |
-| Plugin ↔ backend | `onclose`, or no frame for 15 s | reconnect with 1 → 15 s backoff; HUD shows the countdown |
-| App backgrounded | `FOREGROUND_ENTER_EVENT` | force reconnect immediately |
+| Plugin ↔ backend, silent | no frame for > 3 s (the backend heartbeats every 1 s) | HUD shows `STALE: no update for Ns` and `!` instead of `●`; from 8 s the watchdog drops the socket and reconnects (`- reconnecting`) |
+| Plugin ↔ backend, closed | `onclose` | reconnect with 1 → 15 s backoff; HUD shows the countdown; push-to-talk is reset (mic off) |
+| Prices quiet | `feed.age_ms` + frame age > 3 s | HUD shows `STALE: prices Ns old` |
+| App backgrounded / foregrounded | `FOREGROUND_EXIT` / `FOREGROUND_ENTER` | mic off on exit; on enter, force a reconnect and re-arm push-to-talk |
+| Session started before the feed | `positions_loaded` false, or a position without a mid | the session's uPnL baseline waits for both (an existing position's uPnL never counts as session P&L) |
 | Wrong pairing code | close code 4401 | stop retrying, HUD says "Pairing code rejected" |
 | Telegram token missing/invalid | at startup | bot skipped, backend keeps running, `/healthz` says why |
 | Telegram slow / 429 at startup | `TimedOut` / `RetryAfter` | retried in the background, 5 s doubling to 300 s, never below `retry_after` |
@@ -157,8 +182,10 @@ exists on the API — see `docs/BUILD_LOG.md` §0/§2.
   main wallet key. Agent wallets can trade but cannot withdraw. The key is validated (64 hex
   chars) without being echoed, turned into a signer once, and only the agent's public address
   is logged. Trading is on only when both `HL_ACCOUNT_ADDRESS` and `HL_AGENT_KEY` are set.
-- **Reduce-only, two-tap**: the only order type is a reduce-only IOC close; the menu has no
-  open/add/flip item; the confirm is enforced server-side (see "Closing a position").
+- **Reduce-only, two-tap**: the glasses' own menus (and voice) only offer reduce-only closes and
+  tighter stops. Opening is possible only from your own forwarded instruction, and it always
+  needs an SL and passes the limits. Every order passes the policy guard and the server-side
+  two-tap confirm (see "Closing a position"). Voice only arms.
 - **Testnet, three times**: `assert_testnet` at app creation, in the feed, and when the executor is
   built; the executor also re-checks the SDK object's `base_url` before its first order.
 - **Privacy**: Telegram Bot API only (no userbot / MTProto); the bot only sees chats the user
@@ -178,14 +205,21 @@ exists on the API — see `docs/BUILD_LOG.md` §0/§2.
 | Feed ping / staleness / backoff | `backend/src/tripwire/hl/feed.py` |
 | HUD layout and limits | `plugin/src/hud.ts` |
 | Swipe direction | `SWIPE_TO_ACTION` in `plugin/src/input.ts` |
+| Voice model, push-to-talk limits | `VOICE_ENABLED`, `VOICE_MODEL` in `.env`; `MAX_TALK_MS`, `TAP_GUARD_MS` in `plugin/src/voice.ts`; guards in `backend/src/tripwire/voice.py`; the vocabulary in `voice_grammar.py` |
+| STALE threshold, render tick, watchdog | `STALE_MS` in `plugin/src/hud.ts`, `CLOCK_TICK_MS` in `main.ts`, `WATCHDOG_MS` in `link.ts`; `HEARTBEAT_S` in `ws.py` |
+| Glyphs (`▲ ━ ●` vs `/!\ - *`) | `GLYPHS` in `.env`; `GLYPH_SETS` in `plugin/src/hud.ts` |
+| Journal channel | `JOURNAL_CHAT_ID` in `.env` |
 | Dev commands | `/package.json` scripts |
 
 ## Next (not built yet)
 
-- First live orders on a funded testnet account (needs the faucet + an approved agent wallet,
-  then `DRY_RUN=false`). Verify in order: close → SL move (the `positionTpsl` size convention) →
+- First live orders on a funded testnet account (funds pending). Run `npm run golive:check`,
+  then follow [GO_LIVE.md](GO_LIVE.md): close → SL move (the `positionTpsl` size convention) →
   forwarded open.
-- Real Telegram: set `TELEGRAM_OWNER_ID`, then check an alert DM and a real forward. Business inbox
-  and replies need Premium.
-- Real glasses (swipe direction, the `▲` glyph on hardware).
+- The demo video on a real testnet position ([DEMO.md](DEMO.md)).
+- Telegram Business inbox and replies (need Premium). The owner DM, `/summary` and the journal
+  post are verified on real Telegram (BUILD_LOG §28).
+- Real glasses: swipe direction, the `▲ ━ ●` glyphs and the `━` rule width on hardware, and the
+  G2 microphone for push-to-talk.
+- If Hyperliquid testnet ever becomes unusable: [FALLBACK_BYBIT.md](FALLBACK_BYBIT.md).
 - Day 6: per-module docs, decision log, how-to guide.

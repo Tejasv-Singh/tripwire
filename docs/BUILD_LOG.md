@@ -1487,7 +1487,7 @@ polling, so no conflict with the real backend). Posts are visible at `GET /demo/
 
 | Set | When | Risk | Rule (above the footer) | Live dot |
 |---|---|---|---|---|
-| `unicode` | `GLYPHS=unicode` (default) | `▲` | `━` × 20 | `●` |
+| `unicode` | `GLYPHS=unicode` (default) | `▲` | `━` × 26 (20 at first; widened after the §28 screenshots) | `●` |
 | `ascii` | `GLYPHS=ascii`, if a display shows boxes | `/!\` | `-` × 40 | `*` |
 | legacy | frame without `glyphs` (older backend) | `▲` | `-` × 40 | none |
 
@@ -1576,3 +1576,79 @@ polling, so no conflict with the real backend). Posts are visible at `GET /demo/
 blocked for **"Opening orders need a stop-loss (sl)"**, not for the notional, because the SL check
 runs first in `policy.py`. The storyboard's over-limit message therefore includes `sl 1630`.
 `GO_LIVE.md` already did.
+
+### 28. ✅ Day-3 exit check: simulator + real Telegram (2026-11-25, ~01:55–02:10 IST)
+
+**Setup:**
+- The demo backend on :8010 (`scripts/demo.py`), run first in WATCH mode, then with the fake
+  exchange.
+- Vite on :5174 (`VITE_BACKEND_URL=http://127.0.0.1:8010`).
+- Simulator 0.9.5 with `--automation-port 9898`, driven by a scratch script (not in the repo):
+  inputs, screenshots, `/demo/*`.
+- The user's own backend on :8000 kept running the whole time. The demo backend never polls
+  Telegram, so there was no 409.
+- **Voice:** the PC has no virtual mic. Each push-to-talk ran the real path (long press → mic
+  open → binary PCM frames → release), but `POST /demo/voice` **replaced** the recorded audio
+  with a Windows-TTS WAV ("close half", 1.67 s) **before** transcription. Room audio was never
+  transcribed or stored. The faster-whisper model ran for real.
+- Screenshots: [docs/screenshots/day3/](screenshots/day3/).
+
+| # | Exit-check item | Result |
+|---|---|---|
+| 1 | WATCH: hold-to-talk "close half" shows the transcript and arms, blocked as watch-only | ✅ WATCH `0x7149...7bd0` (a real BTC long 0.30 @ 59,4xx, 10x). `MIC  listening... release to send` → `MIC "close half"` → `BLOCKED  BTC-PERP` / `Watch only - not your account, nothing sent`. Plugin log: `voice heard: "close half" -> close 50% (Watch only ...)`. The arm goes through the same `_select()` as the menu, so the WATCH guard answers instead of a confirm. Nothing can be sent |
+| 2 | Demo backend: the same voice command runs through tap-tap | ✅ `MIC "close half"` / `CONFIRM  Close 50%  ETH-PERP LONG` / `SELL 0.25 ETH  reduce-only IOC` → tap → `SENDING` → `FILLED  Close 50%` / `Filled 0.25 @ 1,667.0` |
+| 3 | Raising /threshold sends the alert DM with the glasses closed | ✅ Simulator closed (`ws_clients 0`) → `POST /demo/threshold {"pct":20}` (liq 14.8 % away) → **a real Telegram DM within ~4 s** (`delivered_to: telegram`): `▲ RISK  ETH-PERP LONG 0.25` / `Liquidation 1,420 is 14.8% from mark 1,666.3 (alert at 20%).` On reconnect the delivered alert did not pop up again |
+| 4 | Ending a session posts the summary to the journal channel | ✅ HUD 2x → `END SESSION?  02:05-now` → tap → `SESSION 02:05-02:07` (Trades 1, Realized +$4.24, uPnL now +$4.21, Session −$0.28, Max drawdown −$4.79, Alerts 1 fired) → tap → `Posted to journal`. **Delivered to the real channel**: the journal text with the trade line `02:06 close 50% ETH LONG: Filled 0.25 @ 1,667.0` and "Numbers only - not advice." The WATCH summary screen worked too (Realized −$0.16 from the watched account's public fills, `Blocks 1` = the watch-only refusal) and was not posted, to keep the channel to one test post |
+| 5 | `npm run golive:check` prints a clean FAIL list | ✅ `1. FAIL Account + agent key in .env (HL_ACCOUNT_ADDRESS is empty; HL_AGENT_KEY is empty)`, `2./3. SKIP` (agent, funds: need the address), `4. PASS` guard, `5. PASS` $15 payload (buy 0.0089 ETH IOC limit 1757.1 + stop 1589.8, limit 1430.8). `Failed:` names only the keys. Exit code 1 |
+
+**Robustness (item 4), seen live:**
+- **Glyphs render** on the G2 framebuffer: `●` after TESTNET, `━` as a solid rule, `▲` (§20).
+  20 `━` spanned only ~400 of 576 px, so the rule is now **26** (~520 px).
+- **STALE on a silent link:** the backend *process* was suspended for 11 s (`NtSuspendProcess`),
+  which kept the socket open but silent. That's the case STALE is for; killing the process would
+  just show "Backend unreachable".
+  - At 4.5 s: `TESTNET !` and `STALE: no update for 5s`.
+  - At 9.5 s: `STALE: no update for 10s - reconnecting`.
+  - After the resume, the plugin reconnected by itself (a fresh `hello`).
+- **Latency** (HL event → glasses render, simulator on the same laptop):
+  - WATCH: p50 195 ms / p95 513 ms (n=19), later **p50 70 ms / p95 521 ms (n=65)**.
+  - Demo: p50 125–264 ms / p95 793–845 ms.
+  - The p95 is dominated by the 500 ms frame throttle.
+
+**Bugs found and fixed during the exit check:**
+1. **Session P&L counted an existing position's whole uPnL.** In WATCH mode the summary said
+   **−$75.62 seconds after startup**, with 0 trades.
+   - Cause: `SessionService` took its uPnL baseline at construction, before the feed had
+     delivered the watched account. There, `positions == []` means "unknown", not "flat".
+   - It would hit an own account the same way.
+   - Fix: `MarketState.positions_loaded` (set by the first `clearinghouseState`; true when there
+     is no account). The baseline waits for it **and** for a live mid on every open position.
+     Without the mid, the first uPnL is priced off `positionValue` and jumps when the mid lands.
+     After the fix: −$2.97 → a real move, then the expected behaviour.
+   - Tests: `test_baseline_waits_for_the_first_positions_snapshot`,
+     `test_baseline_also_waits_for_a_live_mid`, `test_price_only_and_fake_adapter_have_a_baseline_at_once`.
+2. **Flaky test** `test_trade_then_end_session_then_post` (failed 2 of 4 full runs).
+   - The fake fills instantly, so the confirming tap's `ack` can arrive **after** the `order`
+     frame. The next `recv(ws, "ack")` then read that stale ack, and every later assertion was
+     one step behind.
+   - Test-only: on a real exchange the order takes far longer than the ack.
+   - Fix: wait for the `back` acks by `action`. Now 6/6 repeated runs and the full suite pass.
+3. **Cosmetic:** after a voice command that ends on a result (the WATCH refusal), the voice note
+   repeated the result's own message, so the same line showed twice. `renderHud` now skips the
+   note when the result already shows it (test added).
+
+**Checks after the fixes:** **403 backend tests pass**, ruff, mypy and tsc are clean, **plugin
+52 tests pass**.
+
+**Docs refreshed:**
+- README: Day-3 features, voice table, journal setup, STALE / voice / glyph troubleshooting,
+  privacy (voice stays local), faster-whisper in the OSS table, the PowerShell `npm --` gotcha.
+- `architecture.md`: the diagram, latency / voice data flow, failure table, config table, "Next".
+- `ws-protocol.md` (§26).
+
+**Cleanup:**
+- The demo threshold was reset to 5 (the demo DB, `backend/data/demo.sqlite3`).
+- The simulator, demo backend and Vite were stopped; ports 5174 / 8010 / 9898 are free.
+- The user's :8000 backend runs with `--reload`, so it picked up the session fix by itself.
+- Learned: in PowerShell, `npm run backend:demo -- --watch X` loses the `--` (`npm.ps1`), so
+  call `uv --directory backend run python scripts/demo.py --watch X` directly (README updated).

@@ -365,6 +365,14 @@ describe('action screens', () => {
     expect(at({ mode: 'hud' }, { voice: { state: 'error', text: '', note: 'VOICE_ENABLED=false' } }).split('\n')[0]).toBe(
       'MIC  VOICE_ENABLED=false',
     )
+    // ended on a result screen with the same text (WATCH refusal): shown once, not twice
+    const msg = 'Watch only - not your account, nothing sent'
+    const blocked = at(
+      { mode: 'result', coin: 'BTC', ok: false, status: 'blocked', message: msg, label: 'Close 50%' },
+      { voice: { state: 'heard', text: 'close half', note: msg } },
+    ).split('\n')
+    expect(blocked.slice(0, 3)).toEqual(['MIC "close half"', 'BLOCKED  Close 50%  BTC-PERP', msg])
+    expect(blocked.filter((l) => l === msg)).toHaveLength(1)
     // link down: the normal header, never a stale MIC line
     const down = renderHud({ frame: frame({ voice: { state: 'heard', text: 'x', note: null } }), link: { kind: 'retrying', inSeconds: 2 }, now: NOW })
     expect(down.split('\n')[0]).toBe(headerLine(NOW))
