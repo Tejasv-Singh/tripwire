@@ -14,6 +14,8 @@ Demo-only routes (localhost only, not in the real app):
                         handler, as if the owner had forwarded it; returns the bot's reply
   POST /demo/threshold  {"pct": 20}                                -> same as /threshold 20
   POST /demo/business   {"name": "@alice", "text": "still in?"}   -> a business message
+  POST /demo/voice      {"wav_path": "C:/.../close_half.wav"}      -> speech for the next
+                        push-to-talk (16 kHz mono WAV), for machines without a virtual mic
   GET  /demo/dms                                                   -> DMs sent / recorded
 """
 
@@ -22,6 +24,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import wave
 from types import SimpleNamespace
 from typing import Any
 
@@ -87,7 +90,17 @@ def build(args: argparse.Namespace) -> FastAPI:
         def make_adapter(state: MarketState) -> FakeAdapter:
             return FakeAdapter(state, [FAKE_ETH], fill_delay_s=1.0, stops={"ETH": 1500.0})
 
-    app = create_app(settings, run_bot=False, make_adapter=make_adapter)
+    next_speech: dict[str, bytes | None] = {"pcm": None}
+
+    def audio_override() -> bytes | None:
+        """POST /demo/voice queues synthesized speech for the NEXT push-to-talk; it replaces
+        whatever the simulator's microphone recorded, before transcription."""
+        pcm, next_speech["pcm"] = next_speech["pcm"], None
+        return pcm
+
+    app = create_app(
+        settings, run_bot=False, make_adapter=make_adapter, audio_override=audio_override
+    )
     notifier = DemoNotifier(real.telegram_bot_token.get_secret_value(), real.telegram_owner_id)
     app.state.alerts.notifier = notifier
     services = app.state.bot_services
@@ -113,6 +126,17 @@ def build(args: argparse.Namespace) -> FastAPI:
         )
         await make_draft_handler(services).callback(update, None)  # type: ignore[arg-type]
         return {"bot_reply": replies}
+
+    @app.post("/demo/voice")
+    async def voice(request: Request, wav_path: str = Body(..., embed=True)) -> dict[str, Any]:
+        """Use this WAV (16 kHz, 16-bit, mono) as the speech of the next push-to-talk. For
+        machines without a virtual microphone; the long-press / mic / streaming path still runs."""
+        local_only(request)
+        with wave.open(wav_path) as w:
+            if (w.getframerate(), w.getsampwidth(), w.getnchannels()) != (16000, 2, 1):
+                raise HTTPException(400, "need a 16 kHz, 16-bit, mono WAV")
+            next_speech["pcm"] = w.readframes(w.getnframes())
+        return {"queued_seconds": round(len(next_speech["pcm"] or b"") / 32000, 2)}
 
     @app.post("/demo/threshold")
     async def threshold(request: Request, pct: float = Body(..., embed=True)) -> dict[str, Any]:

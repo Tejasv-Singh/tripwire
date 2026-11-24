@@ -182,6 +182,24 @@ export interface HudFrame {
   ui: UiState
   trading: TradingInfo
   inbox?: InboxSummary | null
+  /** push-to-talk line, shown ~2 s: what was heard and what happened */
+  voice?: VoiceOverlay | null
+}
+
+export interface VoiceOverlay {
+  state: 'listening' | 'transcribing' | 'heard' | 'error'
+  text: string
+  note: string | null
+}
+
+/** Reply to a push-to-talk utterance. */
+export interface VoiceFrame {
+  type: 'voice'
+  state: 'listening' | 'heard' | 'error'
+  text?: string
+  command?: string | null
+  ok?: boolean
+  note?: string | null
 }
 
 export interface HelloFrame {
@@ -228,7 +246,14 @@ export interface ReplyFrame {
   to: string
 }
 
-export type ServerFrame = HudFrame | HelloFrame | AckFrame | OrderFrame | ReplyFrame | ErrorFrame
+export type ServerFrame =
+  | HudFrame
+  | HelloFrame
+  | AckFrame
+  | OrderFrame
+  | ReplyFrame
+  | VoiceFrame
+  | ErrorFrame
 
 export interface IntentMessage {
   type: 'intent'

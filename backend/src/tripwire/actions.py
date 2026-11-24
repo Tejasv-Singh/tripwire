@@ -23,6 +23,12 @@ Intents: next | prev | tap | back   (plugin: swipe down/up, tap, double tap)
   reply    tap        -> send the drafted reply (caller does it)    back -> skip
            next/prev  -> nothing                                     timer (REPLY_HOLD_S) -> hud
 
+Voice (voice()): a parsed command ARMS exactly what the matching menu tap would arm -- through
+_select(), so the policy pre-check, WATCH and trading checks are identical -- and the two-tap
+confirm still has to happen. "cancel" leaves any screen; on the reply screen any other speech
+replaces the draft text. A stop-loss command opens the SL submenu, waits for the current stop
+(fetch_stop), then arms (pending_voice).
+
 Menus (`kind`):
   actions  Close 25% | Close 50% | Close 100% | Move SL... | Back       (all reduce risk)
   alert    Move SL | Close 50% | Close all | Snooze 5m                  (risk.py raised it; it
@@ -54,6 +60,7 @@ from tripwire.orders import CloseOrder, OpenOrder, Order, OrderResult, ResultSta
 from tripwire.policy import Decision
 from tripwire.risk import Alert
 from tripwire.trading import SLIPPAGE, round_px, round_size_down
+from tripwire.voice_grammar import VoiceCommand
 
 # Policy pre-check at arm time (PolicyGuard.check bound to the live position / mark), so a
 # blocked order is refused BEFORE the confirm screen. OrderService.submit() checks again.
@@ -68,6 +75,8 @@ MIN_CONFIRM_GAP_S = 0.3  # ...and not sooner than this (a bounced/duplicated tap
 RESULT_HOLD_S = 8.0  # result screen returns to the HUD by itself after this long
 REPLY_HOLD_S = 20.0  # an unanswered reply offer is skipped after this long
 SL_TIGHTEN_PCT = 1.0  # "SL tighter 1%": move the stop this % of mark toward the price
+WATCH_ONLY = "Watch only - not your account, nothing sent"
+VOICE_CLOSE_KEYS = {0.25: "close25", 0.5: "close50", 1.0: "close100"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,6 +150,7 @@ class Outcome:
     fetch_stop: str | None = None  # load this coin's current SL, then call set_stop()
     snooze: tuple[str, str] | None = None  # (coin, side): snooze this alert in the risk engine
     send_reply: ReplyOffer | None = None  # the user tapped "send" on a reply offer
+    show_status: bool = False  # voice "status": the caller shows a one-line status
     extra: dict[str, Any] = field(default_factory=dict)
 
 
@@ -161,6 +171,7 @@ class ActionFlow:
         self.draft_decision: Decision | None = None  # the policy guard's verdict on it
         self.pending_draft: tuple[OrderDraft, Decision] | None = None
         self.reply: ReplyOffer | None = None  # mode "reply"
+        self.pending_voice: str | None = None  # SL item key to arm once the stop has loaded
         self.token = 0  # bumped on every transition; stale timers compare and do nothing
 
     # --- transitions -------------------------------------------------------------------------
@@ -179,6 +190,7 @@ class ActionFlow:
             self.coin, self.armed, self.result, self.cursor = None, None, None, 0
             self.kind, self.parent, self.stop, self.alert = "actions", "actions", None, None
             self.draft, self.draft_decision, self.reply = None, None, None
+            self.pending_voice = None
         if mode == "menu":
             self.armed, self.result = None, None
         return self.token
@@ -350,7 +362,7 @@ class ActionFlow:
         if p is None or p.coin != self.coin:
             return self._fail("Position is closed - nothing to do")
         if ctx.watch:
-            return self._fail("Watch only - not your account, nothing sent")
+            return self._fail(WATCH_ONLY, status="blocked")
         if not ctx.trading:
             return self._fail("Trading off: set HL_AGENT_KEY + HL_ACCOUNT_ADDRESS")
         if item.key in CLOSE_FRACTIONS:
@@ -358,6 +370,88 @@ class ActionFlow:
         if item.key in ("sl_breakeven", "sl_tighten"):
             return self._arm_stop(item, ctx)
         return Outcome(ok=False, note=f"unknown item {item.key}")
+
+    # --- voice ------------------------------------------------------------------------------
+    @staticmethod
+    def _item(key: str) -> MenuItem:
+        for items in MENUS.values():
+            for item in items:
+                if item.key == key:
+                    return item
+        raise KeyError(key)
+
+    def voice(
+        self,
+        command: VoiceCommand | None,
+        heard: str,
+        *,
+        position: Position | None,
+        now: float,
+        trading: bool,
+        size_decimals: int | None = None,
+        watch: bool = False,
+        precheck: Precheck | None = None,
+        ref_px: float | None = None,
+    ) -> Outcome:
+        """Apply a spoken command (see voice_grammar.py). Never sends anything by itself."""
+        ctx = _ArmCtx(position, now, trading, size_decimals, precheck, watch, ref_px)
+        if self.mode == "reply" and self.reply is not None:
+            if command is not None and command.kind == "cancel":
+                self._go("hud")
+                return Outcome(note="reply skipped")
+            text = " ".join(heard.split())[:60].strip()
+            if not text:
+                return Outcome(ok=False, note="didn't hear a reply")
+            self.reply = ReplyOffer(self.reply.target, text, "voice")
+            return Outcome(note="reply text replaced - tap to send")
+        if command is None:
+            return Outcome(ok=False, note="not a command")
+        if command.kind == "cancel":
+            if self.mode == "hud":
+                return Outcome(note="nothing to cancel")
+            self._go("hud")
+            return Outcome(note="cancelled")
+        if self.mode in ("confirm", "sending"):
+            return Outcome(ok=False, note="finish or cancel the current order first")
+        if command.kind == "status":
+            return Outcome(show_status=True)
+        if command.kind == "snooze":
+            if self.mode == "menu" and self.alert is not None:
+                return self._select(self._item("snooze"), ctx)
+            return Outcome(ok=False, note="no alert to snooze")
+        if position is None:
+            return Outcome(ok=False, note="no open position")
+        if self.mode in ("hud", "result"):
+            self.coin, self.kind = position.coin, "actions"
+        if command.kind == "close":
+            return self._select(self._item(VOICE_CLOSE_KEYS[command.fraction or 1.0]), ctx)
+        # stop moves need the position's current stop: open the SL submenu, then arm
+        if not (self.mode == "menu" and self.kind == "sl"):
+            self._open_menu("sl", parent=self.kind if self.kind != "sl" else "actions")
+        if self.stop is not None and self.stop.loaded:
+            return self._select(self._item(command.kind), ctx)
+        self.pending_voice = command.kind
+        return Outcome(fetch_stop=self.coin, note="loading the current stop-loss")
+
+    def take_pending_voice(self) -> str | None:
+        key, self.pending_voice = self.pending_voice, None
+        return key if self.mode == "menu" and self.kind == "sl" else None
+
+    def select_key(
+        self,
+        key: str,
+        *,
+        position: Position | None,
+        now: float,
+        trading: bool,
+        size_decimals: int | None = None,
+        watch: bool = False,
+        precheck: Precheck | None = None,
+        ref_px: float | None = None,
+    ) -> Outcome:
+        """Arm a menu item by key (a voice command whose stop-loss lookup just finished)."""
+        ctx = _ArmCtx(position, now, trading, size_decimals, precheck, watch, ref_px)
+        return self._select(self._item(key), ctx)
 
     def _arm(self, order: Order, label: str, view: dict[str, Any], ctx: _ArmCtx) -> Outcome:
         if ctx.precheck is not None:
@@ -373,7 +467,7 @@ class ActionFlow:
         if draft is None:
             return self._fail("No draft to place")
         if ctx.watch:
-            return self._fail("Watch only - not your account, nothing sent")
+            return self._fail(WATCH_ONLY, status="blocked")
         if not ctx.trading:
             return self._fail("Trading off: set HL_AGENT_KEY + HL_ACCOUNT_ADDRESS (or DRY_RUN)")
         order: OpenOrder = draft.to_order()

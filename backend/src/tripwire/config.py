@@ -75,6 +75,10 @@ class Settings(BaseSettings):
     alert_hysteresis_pct: float = 1.0  # re-arm only once it is threshold + this % away again
     alert_snooze_s: float = 300.0  # "Snooze 5m" on the glasses
 
+    # --- push-to-talk voice commands (voice.py) --------------------------------------------------
+    voice_enabled: bool = True  # local faster-whisper; false = the long-press does nothing
+    voice_model: str = "base"  # faster-whisper size; "base" ~145 MB, ~1.8 s per phrase on CPU
+
     # --- forwarded-message drafts (drafts.py) ---------------------------------------------------
     draft_default_notional_usd: float = 100.0  # when the message names no size
     draft_default_leverage: float = 1.0  # when the message names no "Nx"

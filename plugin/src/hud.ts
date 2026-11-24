@@ -44,6 +44,8 @@ export interface HudInput {
   frame: HudFrame | null
   link: LinkView
   now: Date
+  /** push-to-talk held right now (local, so "listening" shows before the backend answers) */
+  listening?: boolean
   /** ms since the last frame arrived (undefined if none yet) */
   frameAgeMs?: number
 }
@@ -315,10 +317,24 @@ export function currentMode(frame: HudFrame | null, link: LinkView): UiMode {
   return link.kind === 'open' && frame?.ui ? frame.ui.mode : 'hud'
 }
 
-export function renderHud({ frame, link, now, frameAgeMs }: HudInput): string {
+/** Push-to-talk replaces the header line while it is relevant (~2 s after speaking). */
+export function voiceHeader(frame: HudFrame | null, listening: boolean): string | null {
+  if (listening) return 'MIC  listening... release to send'
+  const v = frame?.voice
+  if (!v) return null
+  if (v.state === 'listening') return 'MIC  listening... release to send'
+  if (v.state === 'transcribing') return 'MIC  ...'
+  if (v.state === 'error') return `MIC  ${v.note ?? 'voice unavailable'}`
+  return v.text ? `MIC "${v.text}"` : 'MIC  (nothing heard)'
+}
+
+export function renderHud({ frame, link, now, frameAgeMs, listening = false }: HudInput): string {
   const body: string[] = []
   const mode = currentMode(frame, link)
-  if (link.kind === 'open' && frame) {
+  const open = link.kind === 'open'
+  const mic = open ? voiceHeader(frame, listening) : null
+  if (open && frame) {
+    if (mic && frame.voice?.state === 'heard' && frame.voice.note) body.push(frame.voice.note)
     body.push(...screenLines(frame))
     const feed = feedLine(frame, frameAgeMs)
     if (feed) body.push(feed)
@@ -327,7 +343,7 @@ export function renderHud({ frame, link, now, frameAgeMs }: HudInput): string {
   }
   const tag = headerTag(frame, link)
   const footer = link.kind !== 'open' ? FOOTERS.link : tag === 'WATCH' && mode === 'hud' ? FOOTERS.watch : FOOTERS[mode]
-  const lines = [headerLine(now, tag), ...body.slice(0, BODY_LINES), SEPARATOR, footer]
+  const lines = [mic ?? headerLine(now, tag), ...body.slice(0, BODY_LINES), SEPARATOR, footer]
   return lines.map(fit).join('\n')
 }
 

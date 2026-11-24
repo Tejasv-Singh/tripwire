@@ -9,6 +9,8 @@ export type Command =
   | { kind: 'foreground-enter' } // app came back to the front -> reconnect the WS
   | { kind: 'foreground-exit' }
   | { kind: 'shutdown' } // system / abnormal exit -> clean up
+  | { kind: 'voice-start' } // long press: push-to-talk begins (voice.ts)
+  | { kind: 'voice-stop' } // long-press release: send what was said
 
 /**
  * Swipe mapping. The OS reports a swipe on the text container as a scroll that hit the
@@ -56,6 +58,10 @@ export function commandFromEvent(event: EvenHubEvent, mode: UiMode = 'hud'): Com
     const action = t === null ? undefined : SWIPE_TO_ACTION[t]
     if (action) return { kind: 'intent', action }
   }
+  // Long press = push-to-talk. Checked before CLICK: their eventType is explicit (9 / 10), while
+  // a tap arrives with eventType undefined (defaulted to CLICK above).
+  if (has(OsEventTypeList.LONG_PRESS_EVENT)) return { kind: 'voice-start' }
+  if (has(OsEventTypeList.LONG_PRESS_RELEASE_EVENT)) return { kind: 'voice-stop' }
   if (has(OsEventTypeList.CLICK_EVENT)) return { kind: 'intent', action: 'tap' }
   return null
 }

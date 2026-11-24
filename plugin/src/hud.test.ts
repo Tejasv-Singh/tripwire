@@ -268,6 +268,26 @@ describe('action screens', () => {
     assertFits(withResult)
   })
 
+  it('push-to-talk takes over the header: listening, then what was heard (+ note)', () => {
+    const listening = renderHud({ frame: frame(pos), link: { kind: 'open' }, now: NOW, listening: true })
+    expect(listening.split('\n')[0]).toBe('MIC  listening... release to send')
+    const heard = at(
+      { mode: 'hud' },
+      { voice: { state: 'heard', text: 'close half', note: null } },
+    ).split('\n')
+    expect(heard[0]).toBe('MIC "close half"')
+    expect(heard[1]).toBe('ETH-PERP LONG 0.50 @ 3,412  5x')
+    const status = at({ mode: 'hud' }, { voice: { state: 'heard', text: 'status', note: '1 pos  uPnL +$41.20  DEMO' } })
+    expect(status.split('\n').slice(0, 2)).toEqual(['MIC "status"', '1 pos  uPnL +$41.20  DEMO'])
+    expect(at({ mode: 'hud' }, { voice: { state: 'transcribing', text: '', note: null } }).split('\n')[0]).toBe('MIC  ...')
+    expect(at({ mode: 'hud' }, { voice: { state: 'error', text: '', note: 'VOICE_ENABLED=false' } }).split('\n')[0]).toBe(
+      'MIC  VOICE_ENABLED=false',
+    )
+    // link down: the normal header, never a stale MIC line
+    const down = renderHud({ frame: frame({ voice: { state: 'heard', text: 'x', note: null } }), link: { kind: 'retrying', inSeconds: 2 }, now: NOW })
+    expect(down.split('\n')[0]).toBe(headerLine(NOW))
+  })
+
   it('renders the RISK alert screen with its four actions', () => {
     const alert: UiState = {
       mode: 'menu', kind: 'alert', coin: 'ETH', items: ['Move SL', 'Close 50%', 'Close all', 'Snooze 5m'],

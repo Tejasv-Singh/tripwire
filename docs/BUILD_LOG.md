@@ -1289,3 +1289,94 @@ open with SL** (plus one deliberate over-limit block) → wrap up.
 - `test_golive.py`, 18: the validator against 8 kinds of tampering, every agent and funds
   outcome, the guard, the payload with agent and with throwaway key, and the full reports for
   "nothing configured", "funds missing" and "all ready".
+
+### 24. Voice commands: push-to-talk, local faster-whisper, constrained grammar (item 2)
+
+**What the SDK and simulator offer** (read from `even_hub_sdk` 0.0.16 `index.d.ts` and the
+simulator README):
+- `OsEventTypeList.LONG_PRESS_EVENT` (9) and `LONG_PRESS_RELEASE_EVENT` (10).
+- `bridge.audioControl(isOpen, AudioInputSource.Glasses | Phone)`.
+- `event.audioEvent.audioPcm` (Uint8Array).
+- The simulator emits audio from a PC input device as **16 kHz s16le mono, 100 ms = 3200 bytes
+  per event**. Its automation API has `long_press` / `long_press_release`.
+- This machine has only real microphones (Headset, Microphone, Microphone Array), with no
+  virtual loopback. That shapes the exit check below.
+
+**Plugin (`voice.ts`, `PushToTalk`, injected I/O so it's testable):**
+- Long press → `{"type":"voice","action":"start"}` + `audioControl(true, Glasses)`.
+- Each audio event while held → **one binary WebSocket frame**, sent as-is.
+- Release → `audioControl(false)` + `{"type":"voice","action":"stop"}`.
+- Auto-stop after `MAX_TALK_MS` = 8 s.
+- **The tap-then-long-press OS menu:** a long press within `TAP_GUARD_MS` = 600 ms of a tap is
+  ignored ("just hold to talk"). The gesture is "hold", not "tap and hold".
+- Offline or a mic failure leaves nothing half-open (cancel + mic off).
+- `link.ts` gained `sendJson` / `sendBinary`.
+- **Bug avoided:** `currentText()` runs inside `display.init()`, before the push-to-talk object
+  exists. As a `const` it would have thrown a TDZ ReferenceError at startup (the Day-1 bug
+  class), so it's a `let ... | null`.
+- HUD: while held, the header reads `MIC  listening... release to send`, then `MIC  ...`, then
+  `MIC "close half"` for 2 s. A note line (`not a command`, or the status answer) appears under
+  it. With the link down the normal header is shown.
+
+**Backend STT (`voice.py`, `VoiceEngine`):**
+- faster-whisper **1.2.1**, model `base`, **CPU int8**, in `backend/data/models` (gitignored).
+  It's downloaded once (~145 MB), then loaded with `local_files_only=True`, so there are no
+  network calls afterwards.
+- `HF_HUB_DISABLE_TELEMETRY=1`.
+- Warm-up runs in the background at startup. `/healthz → voice`.
+- Decoding: `language="en"`, `beam_size=1`, `without_timestamps`, `initial_prompt` with the
+  command words.
+- Guards: < 0.3 s of audio or RMS < 0.004 → "" without running the model; the usual Whisper
+  hallucinations ("Thank you.", "you") → ""; max 8 s; one transcription at a time.
+- Measured on this laptop:
+  - Cold download + load: 28 s. Cached load: 5 s.
+  - **~1.6–1.8 s per 1.5–2.5 s phrase.**
+  - Results: `close half` → close 50 %, `stop to breakeven` → stop to breakeven, `snooze.` →
+    snooze, silence → "".
+
+**Grammar (`voice_grammar.py`, pure).**
+- Commands: close 25 / 50 / all (incl. "half", "a quarter", "everything", "flatten", "trim
+  half"), stop to breakeven, stop tighter, snooze, cancel ("never mind", "abort"), status.
+- How words are matched:
+  - Normalisation: number words, `%`, and joining "break even" / "stop loss".
+  - An alias table for mishearings ("clothes" / "close have" → close half, "titer" → tighter).
+  - `difflib` fuzzy matching with cutoff 0.75, for words of 4+ letters (so "stock" doesn't become
+    "stop").
+- **"cancel" always wins.** More than one intent → "one command at a time". `close` without an
+  amount → "close how much?". `close 30` → refused, not rounded. Opening a position is never a
+  voice command.
+
+**Voice only arms** (`ActionFlow.voice`):
+- A command goes through the same `_select()` as the matching menu tap, so the policy
+  pre-check, the WATCH refusal and the trading check are identical. The two-tap confirm still
+  sends.
+- "stop to breakeven / tighter" opens the SL submenu, waits for the current stop
+  (`fetch_stop` → `pending_voice` → `select_key`), then arms.
+- During a confirm only "cancel" is accepted. On the **reply screen any speech replaces the
+  draft text** (≤ 60 characters, source `voice`), and "cancel" skips. "status" shows a one-line
+  status for 4 s.
+- **WATCH-only refusals are now status `blocked`** (title `BLOCKED`), like policy blocks; they
+  used to be `rejected`.
+
+**Protocol:**
+- Client → server: `{"type":"voice","action":"start"|"stop"|"cancel"}`, plus binary PCM frames.
+  Audio outside push-to-talk is ignored and never stored.
+- Server → client: `{"type":"voice","state":"listening"|"heard"|"error","text","command","ok",
+  "note"}`.
+- `hud` frames carry `voice` (the overlay).
+- Logs record the command label and the audio length, **never dictated reply text**.
+
+**Demo backend:** `POST /demo/voice {"wav_path": ...}` (localhost-only) queues a 16 kHz mono
+WAV as the speech of the next push-to-talk. It **replaces** what the simulator's microphone
+recorded **before** transcription, so room audio is never transcribed. It's for machines without
+a virtual mic; the long-press, mic and streaming path still runs.
+
+**Checks:**
+- **382 backend tests pass** (+75):
+  - `test_voice_grammar.py`, 57: 46 understood phrases (17 noisy or misheard) and 11 refusals.
+  - `test_voice.py`, 18: engine guards; flow arms but doesn't send, WATCH blocked, precheck,
+    cancel and busy, status, snooze, no position, SL waits for the lookup, reply dictation;
+    `/ws` push-to-talk with 100 ms binary frames → arms → tap-tap fills; WATCH blocked; audio
+    outside push-to-talk ignored; voice off; unknown speech; status; the 8 s cut.
+- Plugin: **44 tests** (+7): the `PushToTalk` lifecycle, the tap guard, auto-stop,
+  offline / no mic, reset, the long-press mapping, MIC header lines.

@@ -29,6 +29,7 @@ from tripwire.replies import ReplyDrafter
 from tripwire.risk import AlertService, RiskEngine
 from tripwire.state import MarketState
 from tripwire.telegram_bot import BotServices, TelegramBot, build_application
+from tripwire.voice import VoiceEngine
 from tripwire.ws import ClientHub, make_ws_router
 
 log = logging.getLogger("tripwire")
@@ -121,6 +122,22 @@ def format_status(
     return "\n".join(lines)
 
 
+def status_line(state: MarketState, adapter: ExchangeAdapter, guard: PolicyGuard) -> str:
+    """One line for the glasses (voice "status"): positions, uPnL, trading mode, kill switch."""
+    n = len(state.positions)
+    upnl = sum(p.upnl for p in state.positions)
+    mode = (
+        "WATCH" if state.watch
+        else "off" if not adapter.can_trade
+        else "DEMO" if adapter.name == "fake"
+        else "DRY RUN" if adapter.dry_run
+        else "LIVE"
+    )  # fmt: skip
+    kill = "  KILL ON" if guard.kill_switch.engaged else ""
+    pos = f"{n} pos  uPnL {'-' if upnl < 0 else '+'}${abs(upnl):,.2f}" if n else "no positions"
+    return f"{pos}  {mode}{kill}"
+
+
 def create_app(
     settings: Settings | None = None,
     *,
@@ -129,6 +146,8 @@ def create_app(
     min_interval_s: float = 0.5,
     heartbeat_s: float = 5.0,
     make_adapter: Callable[[MarketState], ExchangeAdapter] | None = None,
+    voice_engine: VoiceEngine | None = None,
+    audio_override: Callable[[], bytes | None] | None = None,
 ) -> FastAPI:
     """`make_adapter` swaps the exchange (tests / demo: FakeAdapter). Default: Hyperliquid."""
     settings = settings or Settings()  # type: ignore[call-arg]  # values come from .env
@@ -208,6 +227,12 @@ def create_app(
     def status_text() -> str:
         return format_status(state, adapter, guard, alerts)
 
+    voice = voice_engine or VoiceEngine(
+        enabled=settings.voice_enabled,
+        model_size=settings.voice_model,
+        model_dir=settings.resolved_db_path.parent / "models",
+    )
+
     bot_services.inbox = inbox
     bot_services.status_text = status_text
     bot_services.known_coins = known_coins
@@ -225,6 +250,7 @@ def create_app(
         await asyncio.to_thread(alerts.load_threshold)
         feed_task = asyncio.create_task(feed.run(), name="hl-feed") if feed else None
         alert_task = asyncio.create_task(alerts.run(), name="risk-alerts")
+        voice_task = asyncio.create_task(voice.warm_up(), name="voice-warm-up")
         warm_task = asyncio.create_task(adapter.start(), name="exchange-warm-up")
         await bot.start()
         log.info(
@@ -241,9 +267,9 @@ def create_app(
         try:
             yield
         finally:
-            for task in (warm_task, alert_task):
+            for task in (warm_task, alert_task, voice_task):
                 task.cancel()
-            await asyncio.gather(warm_task, alert_task, return_exceptions=True)
+            await asyncio.gather(warm_task, alert_task, voice_task, return_exceptions=True)
             await bot.stop()
             if feed_task:
                 feed_task.cancel()
@@ -270,6 +296,9 @@ def create_app(
             inbox=inbox,
             replier=replier,
             send_reply=send_reply,
+            voice=voice,
+            status_line=lambda: status_line(state, adapter, guard),
+            audio_override=audio_override,
             min_interval_s=min_interval_s,
             heartbeat_s=heartbeat_s,
         )
@@ -299,6 +328,7 @@ def create_app(
                 "mode": "two-tap confirm; every order through the policy guard",
             },
             "policy": guard.status(),
+            "voice": {"status": voice.status, "detail": voice.detail},
             "alerts": {
                 **alerts.engine.status(asyncio.get_running_loop().time()),
                 "last": alerts.last_delivery,
@@ -315,6 +345,7 @@ def create_app(
     app.state.alerts = alerts
     app.state.bot_services = bot_services
     app.state.inbox = inbox
+    app.state.voice = voice
     app.state.replier = replier
     app.state.kill_switch = kill_switch
     return app

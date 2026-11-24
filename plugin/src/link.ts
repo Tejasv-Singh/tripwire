@@ -107,8 +107,20 @@ export class BackendLink {
   }
 
   sendIntent(action: IntentAction): boolean {
+    return this.sendJson({ type: 'intent', action })
+  }
+
+  /** Any JSON message (intents, voice start/stop, render acks). False when offline. */
+  sendJson(message: object): boolean {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false
-    this.ws.send(JSON.stringify({ type: 'intent', action }))
+    this.ws.send(JSON.stringify(message))
+    return true
+  }
+
+  /** Raw bytes as one binary frame (push-to-talk PCM). False when offline. */
+  sendBinary(bytes: Uint8Array): boolean {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return false
+    this.ws.send(bytes)
     return true
   }
 

@@ -8,7 +8,11 @@ Per connection:
     feeds them to this client's ActionFlow (actions.py: menu -> two-tap confirm -> order);
   * a confirmed close runs as a background task (OrderExecutor, trading.py). It is deliberately
     NOT cancelled if the glasses disconnect: the order may already be on its way, and its result
-    must still be logged.
+    must still be logged;
+  * push-to-talk: {"type":"voice","action":"start"}, then BINARY frames of raw PCM (16 kHz s16le
+    mono) while the long-press is held, then {"type":"voice","action":"stop"} -> local
+    faster-whisper (voice.py) -> voice_grammar.py -> ActionFlow.voice(), which only ARMS.
+    The transcript shows on the glasses for VOICE_OVERLAY_S.
 Protocol reference: docs/ws-protocol.md.
 """
 
@@ -16,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
@@ -42,6 +47,8 @@ from tripwire.policy import Decision, PolicyGuard
 from tripwire.replies import ReplyContext, ReplyDrafter
 from tripwire.risk import Alert
 from tripwire.state import MarketState
+from tripwire.voice import BYTES_PER_SECOND, MAX_SECONDS, VoiceEngine
+from tripwire.voice_grammar import parse_voice
 
 log = logging.getLogger(__name__)
 
@@ -49,11 +56,19 @@ CLOSE_BAD_PAIRING_CODE = 4401
 PENDING_DRAFT_S = 300.0  # a draft forwarded while no glasses were connected waits this long
 MIN_INTERVAL_S = 0.5
 HEARTBEAT_S = 5.0
+VOICE_OVERLAY_S = 2.0  # how long the transcript stays on the glasses
+STATUS_OVERLAY_S = 4.0  # voice "status" answer
+MAX_VOICE_BYTES = int(MAX_SECONDS * BYTES_PER_SECOND)
 
 
 class IntentMessage(BaseModel):
     type: Literal["intent"]
     action: Literal["next", "prev", "tap", "back"]
+
+
+class VoiceMessage(BaseModel):
+    type: Literal["voice"]
+    action: Literal["start", "stop", "cancel"]
 
 
 def _log_task_failure(task: asyncio.Task[None]) -> None:
@@ -73,6 +88,9 @@ class ClientSession:
         self.connected = True
         self.dirty = asyncio.Event()
         self.send_lock = asyncio.Lock()
+        self.voice_buf: bytearray | None = None  # not None while push-to-talk is held
+        self.voice_overlay: dict[str, Any] | None = None  # {"state", "text", "note"} on screen
+        self.voice_token = 0
 
     def wake(self) -> None:
         self.dirty.set()
@@ -134,6 +152,9 @@ def make_ws_router(
     inbox: Inbox | None = None,
     replier: ReplyDrafter | None = None,
     send_reply: Callable[[ReplyTarget, str], Awaitable[bool]] | None = None,
+    voice: VoiceEngine | None = None,
+    status_line: Callable[[], str] | None = None,
+    audio_override: Callable[[], bytes | None] | None = None,  # demo only: substitute speech
     min_interval_s: float = MIN_INTERVAL_S,
     heartbeat_s: float = HEARTBEAT_S,
 ) -> APIRouter:
@@ -202,6 +223,13 @@ def make_ws_router(
             session.wake()
             return
         if session.flow.set_stop(coin, info):
+            session.wake()
+        pending = session.flow.take_pending_voice()  # a spoken "stop to breakeven" waited for this
+        if pending is not None:
+            loop = asyncio.get_running_loop()
+            position = selected_position(session)
+            out = session.flow.select_key(pending, **flow_ctx(session, position, loop.time()))
+            apply_outcome(None, session, out, loop.time())
             session.wake()
 
     def spawn(session: ClientSession, coro: Any, name: str) -> None:
@@ -315,45 +343,153 @@ def make_ws_router(
                 lock_coin=session.flow.coin,
                 trading=trading_info(),
                 inbox=inbox.summary() if inbox is not None else None,
+                voice=session.voice_overlay,
             )
             session.index = frame["view"]["index"]  # clamp / follow the locked coin
             await send(ws, session, frame)
             last_sent = loop.time()
 
+    def flow_ctx(session: ClientSession, position: Position | None, now: float) -> dict[str, Any]:
+        return {
+            "position": position,
+            "now": now,
+            "trading": trading_on(),
+            "size_decimals": adapter.size_decimals(position.coin) if position else None,
+            "watch": state.watch,
+            "precheck": precheck,
+            "ref_px": ref_price(session.flow.coin) if session.flow.coin else None,
+        }
+
+    def apply_outcome(ws: WebSocket | None, session: ClientSession, out: Any, now: float) -> None:
+        """Side effects an ActionFlow Outcome asks for (shared by taps, voice, pending voice)."""
+        if out.timer_s is not None:
+            schedule(session, out.timer_s, out.token)
+        if out.execute is not None and ws is not None:
+            spawn(session, run_order(ws, session, out.execute), "order")
+        elif out.execute is not None:
+            spawn(session, run_order(session_ws[session], session, out.execute), "order")
+        if out.fetch_stop is not None:
+            spawn(session, load_stop(session, out.fetch_stop), "stop-lookup")
+        if out.snooze is not None and on_snooze is not None:
+            on_snooze(out.snooze[0], out.snooze[1], now)
+        if out.send_reply is not None:
+            target_ws = ws if ws is not None else session_ws[session]
+            spawn(session, deliver_reply(target_ws, session, out.send_reply), "reply-send")
+
+    session_ws: dict[ClientSession, WebSocket] = {}
+
+    def show_voice(session: ClientSession, overlay: dict[str, Any] | None, hold_s: float) -> None:
+        """Put the voice line on this client's screen; clear it after hold_s (0 = keep)."""
+        session.voice_overlay = overlay
+        session.voice_token += 1
+        token = session.voice_token
+        session.wake()
+        if hold_s > 0:
+
+            def clear() -> None:
+                if session.voice_token == token:
+                    session.voice_overlay = None
+                    session.wake()
+
+            session.timers.append(asyncio.get_running_loop().call_later(hold_s, clear))
+
+    async def run_voice(ws: WebSocket, session: ClientSession, pcm: bytes) -> None:
+        loop = asyncio.get_running_loop()
+        if audio_override is not None and (substitute := audio_override()) is not None:
+            pcm = substitute  # demo backend: synthesized speech instead of the room microphone
+        assert voice is not None
+        try:
+            text = await voice.transcribe(pcm)
+        except RuntimeError as exc:
+            show_voice(session, {"state": "error", "text": "", "note": str(exc)[:60]}, 3.0)
+            return
+        parsed = parse_voice(text)
+        out = session.flow.voice(
+            parsed.command,
+            parsed.heard,
+            **flow_ctx(session, selected_position(session), loop.time()),
+        )
+        apply_outcome(ws, session, out, loop.time())
+        note = (
+            out.note if parsed.command is not None or session.flow.mode == "reply" else parsed.error
+        )
+        hold = VOICE_OVERLAY_S
+        if out.show_status and status_line is not None:
+            note, hold = status_line(), STATUS_OVERLAY_S
+        show_voice(session, {"state": "heard", "text": parsed.heard, "note": note}, hold)
+        label = parsed.command.label if parsed.command else None
+        log.info(  # the command, never free dictation text
+            "voice from %s: %s (%.1fs audio) -> mode=%s%s",
+            session.client,
+            label or "no command",
+            len(pcm) / BYTES_PER_SECOND,
+            session.flow.mode,
+            f" ({note})" if note else "",
+        )
+        if session.connected:
+            with contextlib.suppress(Exception):
+                await send(ws, session, {
+                    "type": "voice", "state": "heard", "text": parsed.heard, "command": label,
+                    "ok": out.ok and parsed.error is None, "note": note,
+                })  # fmt: skip
+
+    async def handle_voice(ws: WebSocket, session: ClientSession, msg: VoiceMessage) -> None:
+        if msg.action == "start":
+            if voice is None or voice.status in ("off", "error"):
+                reason = voice.detail if voice is not None else "voice not configured"
+                show_voice(session, {"state": "error", "text": "", "note": reason[:60]}, 3.0)
+                await send(ws, session, {"type": "voice", "state": "error", "note": reason})
+                return
+            session.voice_buf = bytearray()
+            show_voice(session, {"state": "listening", "text": "", "note": None}, 0)
+            await send(ws, session, {"type": "voice", "state": "listening"})
+        elif msg.action == "cancel":
+            session.voice_buf = None
+            show_voice(session, None, 0)
+        else:  # stop
+            await finish_voice(ws, session)
+
+    async def finish_voice(ws: WebSocket, session: ClientSession) -> None:
+        if session.voice_buf is None:
+            return
+        pcm, session.voice_buf = bytes(session.voice_buf), None
+        show_voice(session, {"state": "transcribing", "text": "", "note": None}, 0)
+        spawn(session, run_voice(ws, session, pcm), "voice")
+
+    async def handle_audio(ws: WebSocket, session: ClientSession, chunk: bytes) -> None:
+        if session.voice_buf is None:
+            return  # audio outside push-to-talk is ignored (and never stored)
+        session.voice_buf.extend(chunk[: MAX_VOICE_BYTES - len(session.voice_buf)])
+        if len(session.voice_buf) >= MAX_VOICE_BYTES:
+            await finish_voice(ws, session)  # held too long: transcribe what we have
+
     async def receiver(ws: WebSocket, session: ClientSession) -> None:
         loop = asyncio.get_running_loop()
-        async for text in ws.iter_text():
+        while True:
+            message = await ws.receive()
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(message.get("code", 1000))
+            if message.get("bytes") is not None:
+                await handle_audio(ws, session, message["bytes"])
+                continue
+            text = message.get("text") or ""
             try:
-                intent = IntentMessage.model_validate_json(text)
-            except ValidationError:
+                data = json.loads(text)
+                if isinstance(data, dict) and data.get("type") == "voice":
+                    await handle_voice(ws, session, VoiceMessage.model_validate(data))
+                    continue
+                intent = IntentMessage.model_validate(data)
+            except (ValueError, ValidationError):
                 await send(
                     ws, session, {"type": "error", "error": "bad_message", "raw": text[:200]}
                 )
                 continue
             position = selected_position(session)
-            out = session.flow.handle(
-                intent.action,
-                position=position,
-                now=loop.time(),
-                trading=trading_on(),
-                size_decimals=adapter.size_decimals(position.coin) if position else None,
-                watch=state.watch,
-                precheck=precheck,
-                ref_px=ref_price(session.flow.coin) if session.flow.coin else None,
-            )
+            out = session.flow.handle(intent.action, **flow_ctx(session, position, loop.time()))
             count = len(state.positions)
             if out.nav is not None:
                 session.index = apply_nav(session.index, count, out.nav)
-            if out.timer_s is not None:
-                schedule(session, out.timer_s, out.token)
-            if out.execute is not None:
-                spawn(session, run_order(ws, session, out.execute), "order")
-            if out.fetch_stop is not None:
-                spawn(session, load_stop(session, out.fetch_stop), "stop-lookup")
-            if out.snooze is not None and on_snooze is not None:
-                on_snooze(out.snooze[0], out.snooze[1], loop.time())
-            if out.send_reply is not None:
-                spawn(session, deliver_reply(ws, session, out.send_reply), "reply-send")
+            apply_outcome(ws, session, out, loop.time())
             log.info(
                 "intent %s from %s -> mode=%s index=%d/%d%s",
                 intent.action,
@@ -402,6 +538,7 @@ def make_ws_router(
         )
         state.add_listener(session.wake)
         hub.sessions.add(session)
+        session_ws[session] = ws
         waiting = hub.take_pending_draft(asyncio.get_running_loop().time())
         if waiting is not None:
             session.flow.raise_draft(*waiting)
@@ -418,6 +555,8 @@ def make_ws_router(
             session.cancel_timers()
             state.remove_listener(session.wake)
             hub.sessions.discard(session)
+            session_ws.pop(session, None)
+            session.voice_buf = None  # an unfinished push-to-talk is dropped, never transcribed
             send_task.cancel()
             await asyncio.gather(send_task, return_exceptions=True)
             log.info("WS client disconnected: %s (%d left)", client, hub.count)

@@ -56,6 +56,7 @@ def build_hud_frame(
     lock_coin: str | None = None,
     trading: dict[str, Any] | None = None,
     inbox: dict[str, Any] | None = None,
+    voice: dict[str, Any] | None = None,
     now_ms: int | None = None,
     now_mono: float | None = None,
 ) -> dict[str, Any]:
@@ -93,4 +94,6 @@ def build_hud_frame(
         "trading": trading or {"enabled": False, "status": "off"},
         # Telegram Business: {"count", "from", "preview" (first 30 chars, memory only)} or null
         "inbox": inbox,
+        # push-to-talk line: {"state": listening|transcribing|heard|error, "text", "note"} or null
+        "voice": voice,
     }

@@ -41,6 +41,12 @@ describe('commandFromEvent', () => {
     expect(commandFromEvent(text(OsEventTypeList.SCROLL_TOP_EVENT), 'confirm')).toEqual({ kind: 'intent', action: 'prev' })
   })
 
+  it('long press starts push-to-talk, release stops it (on every screen)', () => {
+    expect(commandFromEvent(sys(OsEventTypeList.LONG_PRESS_EVENT))).toEqual({ kind: 'voice-start' })
+    expect(commandFromEvent(text(OsEventTypeList.LONG_PRESS_EVENT), 'confirm')).toEqual({ kind: 'voice-start' })
+    expect(commandFromEvent(sys(OsEventTypeList.LONG_PRESS_RELEASE_EVENT))).toEqual({ kind: 'voice-stop' })
+  })
+
   it('maps lifecycle events', () => {
     expect(commandFromEvent(sys(OsEventTypeList.FOREGROUND_ENTER_EVENT))).toEqual({ kind: 'foreground-enter' })
     expect(commandFromEvent(sys(OsEventTypeList.FOREGROUND_EXIT_EVENT))).toEqual({ kind: 'foreground-exit' })

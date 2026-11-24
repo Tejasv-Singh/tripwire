@@ -25,7 +25,10 @@ CODE = "test-pairing-code"
 
 
 def settings(tmp_path: Path, **kw: object) -> Settings:
-    kw.setdefault("dry_run", False)  # dry run would load coin metadata over the network
+    kw.setdefault("dry_run", False)
+    kw.setdefault(
+        "voice_enabled", False
+    )  # never load the speech model in tests  # dry run would load coin metadata over the network
     return Settings(  # type: ignore[call-arg]
         _env_file=None, pairing_code=CODE, db_path=tmp_path / "t.sqlite3", **kw
     )
