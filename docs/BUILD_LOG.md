@@ -792,3 +792,54 @@ implemented". The docstring maps each method to its Bybit v5 endpoint (e.g.
 **Fix, noted for honesty:** the §14 commit corrupted one character in `test_app.py`'s docstring
 (`—` became `â€”`). Windows PowerShell 5.1 `Get-Content`/`Set-Content` re-encoded the UTF-8
 file. It's fixed now, and file edits no longer go through PowerShell.
+
+### 16. DRY_RUN: real testnet payloads, really signed, never sent (item 5)
+
+**`DRY_RUN=true` is the default.** `HyperliquidAdapter(dry_run=True)` runs the **same**
+build-and-sign path as live trading (§15). In `_submit()`, after `assert_testnet` and
+`sign_l1_action(..., is_mainnet=False)`, it writes the exact `/exchange` payload to the log and
+to `backend/data/dry_run_orders.jsonl` (gitignored), then returns `DRY_RUN_REPLY` instead of
+POSTing.
+
+**Signer:**
+- If `HL_AGENT_KEY` is set, the payload is signed with it but still not sent.
+- Otherwise it's signed with a **throwaway key** from `eth_account.Account.create()` at startup.
+  The key is never logged or stored; only its public address appears, as `signer`.
+- `/healthz → trading.detail` says `DRY RUN: signed with throwaway key 0x1234...abcd, NOT sent`.
+  Live mode says `LIVE on testnet: agent key ...`.
+
+**When trading is enabled:**
+- `can_trade` = signer present, not WATCH, and (account set **or** dry run).
+- So dry run can sign opening drafts even in price-only mode (item 6). There are no positions
+  then, so the close menu can't open.
+- Live trading still needs `HL_ACCOUNT_ADDRESS` + `HL_AGENT_KEY` + `DRY_RUN=false`.
+- WATCH never trades, dry run or not.
+
+**What still talks to Hyperliquid in dry run:** only the public `/info` meta (asset ids,
+szDecimals), so the payloads use the real asset index, lot rounding and tick rounding. Nothing is
+POSTed to `/exchange`.
+
+**Results:**
+- New status `dry_run` (result title `DRY RUN`), with messages saying what was signed:
+  - `DRY RUN: sell 0.25 ETH IOC @ 3319.7 signed, not sent`
+  - `DRY RUN: SL 3412 signed + cancel of old SL, not sent`
+- Rows go to `order_log` like any other result.
+
+**On the glasses:**
+- The header shows `TRIPWIRE DRY RUN` whenever trading is enabled in dry-run mode (`DEMO` for the
+  fake exchange, `WATCH` for watch mode).
+- The confirm line reads `Tap again within 5s to SIGN (dry run).`
+
+**Testnet guard:** the constructor refuses a non-testnet URL even in dry run, and every signature
+call is preceded by `assert_testnet`.
+
+**Checks:** **170 backend tests pass** (+7, new `test_dry_run.py`):
+- The dry-run close wire is byte-identical to the live wire from `test_trading.py`.
+- `recover_agent_or_user_from_l1_action` **recovers the signer from the logged payload with
+  `is_mainnet=False`** (and does *not* with `True`). This proves a real testnet signature.
+- The agent key never appears in the log.
+- Agent-key signing; SL = place + cancel, both signed; an open without any account = leverage +
+  order legs; WATCH never trades; mainnet refused.
+
+Test settings now pass `dry_run=False` by default, so app tests never load metadata over the
+network. Plugin: 30 tests.

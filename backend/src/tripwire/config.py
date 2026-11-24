@@ -62,6 +62,11 @@ class Settings(BaseSettings):
     # drafts, and receives alert DMs. The bot's /start reply tells you the number.
     telegram_owner_id: int | None = None
 
+    # DRY_RUN (default ON): orders are built and SIGNED exactly like live ones (with HL_AGENT_KEY,
+    # or a throwaway key generated at startup if it is empty) and logged, never POSTed.
+    # Set DRY_RUN=false (with an agent key) to really trade on testnet.
+    dry_run: bool = True
+
     # --- policy guard (policy.py) ---------------------------------------------------------------
     kill_switch: bool = False  # true -> no order that adds exposure (closes / tighter SLs still ok)
     max_open_notional_usd: float = 250.0  # per opening order
@@ -117,8 +122,9 @@ class Settings(BaseSettings):
 
     @property
     def trading_enabled(self) -> bool:
-        """Orders need both: the agent key signs, the account address says whose positions."""
-        return bool(self.hl_account_address and self.hl_agent_key.get_secret_value())
+        """Live orders need an account and the agent key; DRY_RUN signs with a throwaway key."""
+        has_signer = bool(self.hl_agent_key.get_secret_value()) or self.dry_run
+        return bool(self.hl_account_address and has_signer and not self.watch_mode)
 
     @property
     def cors_origin_list(self) -> list[str]:

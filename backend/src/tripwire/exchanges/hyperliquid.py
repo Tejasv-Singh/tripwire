@@ -5,9 +5,14 @@ Positions stream: hl/feed.py (run by main.py) writes clearinghouseState into Mar
 
 Orders are built from the SDK's own pieces (`order_request_to_order_wire`,
 `order_wires_to_order_action`, `sign_l1_action`) instead of calling `Exchange.market_close()`, so
-there is ONE build-and-sign path, and DRY_RUN (item 5) runs exactly that path and only skips the
-final POST. Every action is signed with `is_mainnet=False` and `assert_testnet()` runs before
-every signature.
+there is ONE build-and-sign path, and DRY_RUN runs exactly that path and only skips the final
+POST. Every action is signed with `is_mainnet=False` and `assert_testnet()` runs before every
+signature.
+
+DRY_RUN (default on, `.env DRY_RUN=true`): the signer is the agent key if set, otherwise a
+throwaway key generated at startup (never logged, never stored). Each signed payload is logged and
+appended to `backend/data/dry_run_orders.jsonl`; nothing is POSTed. Coin metadata still comes from
+the public /info endpoint, so asset ids, lot sizes and tick rounding are the real ones.
 
 Order shapes (all reduce-only except the opening leg of place_order):
   close_reduce_only  IOC limit at mid ± 5 % for `size` (rounded down to szDecimals), reduce_only
@@ -28,6 +33,7 @@ import datetime as dt
 import json
 import logging
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
 
 from tripwire.config import TESTNET_API_URL, TestnetGuardError, assert_testnet
@@ -36,6 +42,7 @@ from tripwire.hl.positions import Position, to_float
 from tripwire.orders import CloseOrder, OpenOrder, OrderResult, StopOrder
 from tripwire.state import MarketState
 from tripwire.trading import (
+    DRY_RUN_REPLY,
     HTTP_TIMEOUT_S,
     ORDER_TIMEOUT_S,
     SLIPPAGE,
@@ -108,6 +115,8 @@ class HyperliquidAdapter:
         account_address: str,
         agent_key: str = "",
         watch: bool = False,
+        dry_run: bool = False,
+        dry_run_log: Path | None = None,
         info_factory: InfoFactory | None = None,
         poster: Poster | None = None,
     ) -> None:
@@ -118,13 +127,22 @@ class HyperliquidAdapter:
         self.watch = watch
         self._wallet: Any = None
         self.agent_address = ""
-        if agent_key:
+        self.signer_kind = ""  # "agent" | "throwaway"
+        self.dry_run = dry_run
+        self.dry_run_log = dry_run_log
+        if agent_key or dry_run:
             import eth_account
 
-            self._wallet = eth_account.Account.from_key(agent_key)  # signer; the key is not kept
+            if agent_key:
+                self._wallet = eth_account.Account.from_key(agent_key)  # the key is not kept
+                self.signer_kind = "agent"
+            else:  # DRY_RUN without a key: a fresh throwaway key, only to sign real payloads
+                self._wallet = eth_account.Account.create()
+                self.signer_kind = "throwaway"
             self.agent_address = str(self._wallet.address)
-        self.dry_run = False
-        self.can_trade = bool(account_address and self._wallet is not None and not watch)
+        # dry run may sign without an account (forwarded drafts in price-only mode); live may not
+        has_account = bool(account_address) or dry_run
+        self.can_trade = bool(has_account and self._wallet is not None and not watch)
         self.status: TradingStatus = "warming" if self.can_trade else "off"
         self.detail = "loading coin metadata" if self.can_trade else self._off_reason()
         self._info: Any = None
@@ -160,8 +178,13 @@ class HyperliquidAdapter:
                 raise TestnetGuardError("Info is not pointed at the testnet URL")
             self._info = info
             if self.can_trade:
-                self.status, self.detail = "ready", f"agent {self.signer_short}"
-                log.info("Trading ready on testnet: agent %s", self.signer_short)
+                signer = f"{self.signer_kind} key {self.signer_short}"
+                if self.dry_run:
+                    self.status, self.detail = "ready", f"DRY RUN: signed with {signer}, NOT sent"
+                    log.info("DRY RUN on: orders signed with %s and logged, never sent", signer)
+                else:
+                    self.status, self.detail = "ready", f"LIVE on testnet: {signer}"
+                    log.info("Trading LIVE on testnet: %s", signer)
         return self._info
 
     async def start(self) -> None:
@@ -221,8 +244,23 @@ class HyperliquidAdapter:
             "vaultAddress": None,
             "expiresAfter": None,
         }
+        if self.dry_run:
+            await asyncio.to_thread(self._record_dry_run, what, payload)
+            return DRY_RUN_REPLY
         log.info("ORDER %s (testnet) action=%s", what, json.dumps(action, separators=(",", ":")))
         return await asyncio.wait_for(asyncio.to_thread(self._poster, payload), ORDER_TIMEOUT_S)
+
+    def _record_dry_run(self, what: str, payload: dict[str, Any]) -> None:
+        """The signed payload, exactly as it would have been POSTed to /exchange."""
+        line = json.dumps(
+            {"what": what, "signer": self.agent_address, "network": "testnet", "payload": payload},
+            separators=(",", ":"),
+        )
+        log.info("DRY RUN (signed, NOT sent) %s: %s", what, line)
+        if self.dry_run_log is not None:
+            self.dry_run_log.parent.mkdir(parents=True, exist_ok=True)
+            with self.dry_run_log.open("a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
 
     async def _guarded(self, what: str, run: Callable[[Any], Any]) -> OrderResult:
         """Lock, metadata, and error mapping shared by every order method."""
@@ -267,7 +305,12 @@ class HyperliquidAdapter:
                 info.name_to_asset(order.coin), is_buy, sz, px, {"limit": {"tif": "Ioc"}}, True
             )
             resp = await self._submit(_order_action([wire], "na"), f"close {order.coin} {sz}")
-            return parse_order_response(resp)
+            result = parse_order_response(resp)
+            if result.status == "dry_run":
+                verb = "buy" if is_buy else "sell"
+                msg = f"DRY RUN: {verb} {sz:g} {order.coin} IOC @ {px:g} signed, not sent"
+                return OrderResult(True, "dry_run", msg)
+            return result
 
         return await self._guarded(f"close {order.coin}", run)
 
@@ -289,6 +332,13 @@ class HyperliquidAdapter:
             )
             if not placed.ok:
                 return placed  # old SL untouched: the position is still protected
+            if placed.status == "dry_run":
+                message = f"DRY RUN: SL {trig:g} signed"
+                if order.old_oid is not None:
+                    cancel = {"type": "cancel", "cancels": [{"a": asset, "o": order.old_oid}]}
+                    await self._submit(cancel, f"cancel old SL {order.old_oid}")
+                    message += " + cancel of old SL"
+                return OrderResult(True, "dry_run", message + ", not sent")
             message = f"SL set at {trig:g}"
             if order.old_oid is not None:
                 cancel = {"type": "cancel", "cancels": [{"a": asset, "o": order.old_oid}]}

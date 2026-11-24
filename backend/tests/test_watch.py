@@ -23,6 +23,7 @@ CODE = "test-pairing-code"
 
 
 def make(tmp_path: Path, **kw: object) -> Settings:
+    kw.setdefault("dry_run", False)
     return Settings(  # type: ignore[call-arg]
         _env_file=None, pairing_code=CODE, db_path=tmp_path / "w.sqlite3", **kw
     )

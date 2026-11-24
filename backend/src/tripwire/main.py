@@ -93,6 +93,8 @@ def create_app(
             account_address=settings.hl_account_address,
             agent_key=settings.hl_agent_key.get_secret_value(),
             watch=settings.watch_mode,
+            dry_run=settings.dry_run,
+            dry_run_log=settings.resolved_db_path.parent / "dry_run_orders.jsonl",
         )
     else:
         adapter = make_adapter(state)

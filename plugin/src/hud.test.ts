@@ -207,6 +207,18 @@ describe('action screens', () => {
     ])
   })
 
+  it('DRY RUN and DEMO are shown in the header; dry run confirms say SIGN, not SEND', () => {
+    const dry = { trading: { enabled: true, status: 'ready' as const, dry_run: true, exchange: 'hyperliquid' } }
+    const text = at(confirm, dry).split('\n')
+    expect(text[0]).toBe('TRIPWIRE DRY RUN    TESTNET      09:05')
+    expect(text).toContain('Tap again within 5s to SIGN (dry run).')
+    const demo = { trading: { enabled: true, status: 'ready' as const, dry_run: false, exchange: 'fake' } }
+    expect(at(menu, demo).split('\n')[0]).toBe('TRIPWIRE DEMO       TESTNET      09:05')
+    // dry run flag without trading enabled (e.g. no account): no tag
+    const off = { trading: { enabled: false, status: 'off' as const, dry_run: true, exchange: 'hyperliquid' } }
+    expect(at(menu, off).split('\n')[0]).toBe(headerLine(NOW))
+  })
+
   it('confirm: BUY to close a short, ALL for 100%, ~ when the size is not rounded yet', () => {
     expect(at({ ...confirm, side: 'SHORT' })).toContain('BUY 0.25 ETH  reduce-only IOC')
     expect(at({ ...confirm, all: true, size: 0.5, label: 'Close 100%' })).toContain('SELL ALL 0.5 ETH')

@@ -23,6 +23,13 @@ MAX_MESSAGE_LEN = 120
 CloseRequest = CloseOrder  # Day-2 name
 __all__ = ["CloseRequest", "OrderResult", "ResultStatus", "TradingStatus"]
 
+# What the Hyperliquid adapter "receives" in DRY_RUN instead of a real /exchange reply.
+DRY_RUN_REPLY: dict[str, Any] = {
+    "status": "ok",
+    "dry_run": True,
+    "response": {"type": "dryRun", "data": {"statuses": ["dryRun"]}},
+}
+
 
 def round_size_down(size: float, decimals: int) -> float:
     """Round DOWN to the coin's szDecimals so a partial close never exceeds what was shown."""
@@ -66,6 +73,8 @@ def parse_order_response(resp: Any) -> OrderResult:
     if isinstance(st, str):  # trigger orders / TP-SL children and cancels answer with a word
         if st in ("waitingForTrigger", "waitingForFill", "success"):
             return OrderResult(True, "placed", f"Placed ({st})")
+        if st == "dryRun":
+            return OrderResult(True, "dry_run", "DRY RUN: signed, not sent")
         return OrderResult(False, "error", short_message(f"Unknown order status: {st!r}"))
     if not isinstance(st, Mapping):
         return OrderResult(False, "error", "Empty order reply from Hyperliquid")

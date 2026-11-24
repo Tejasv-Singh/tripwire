@@ -148,14 +148,23 @@ function orderLine(ui: OrderScreen): string {
   return `${verb} ${qty} ${ui.coin}  reduce-only IOC`
 }
 
-function confirmLines(ui: OrderScreen): string[] {
+function confirmLines(ui: OrderScreen, dryRun: boolean): string[] {
   const secs = Math.max(1, Math.ceil(ui.expires_in_ms / 1000))
   return [
     `CONFIRM  ${ui.label}  ${ui.coin}-PERP ${ui.side}`,
     orderLine(ui),
     `at ~${fmtLive(ui.est_px)} mark, max ${ui.slippage_pct}% slippage`,
-    `Tap again within ${secs}s to SEND.`,
+    dryRun ? `Tap again within ${secs}s to SIGN (dry run).` : `Tap again within ${secs}s to SEND.`,
   ]
+}
+
+/** Header tag: what kind of session this is, so nobody mistakes it for live trading. */
+export function headerTag(frame: HudFrame | null, link: LinkView): string {
+  if (link.kind !== 'open' || !frame) return ''
+  if (frame.watch) return 'WATCH' // someone else's positions, read-only
+  if (frame.trading?.exchange === 'fake') return 'DEMO' // in-memory fake exchange
+  if (frame.trading?.enabled && frame.trading.dry_run) return 'DRY RUN' // signed, never sent
+  return ''
 }
 
 function sendingLines(ui: OrderScreen): string[] {
@@ -183,7 +192,7 @@ function screenLines(f: HudFrame): string[] {
     case 'menu':
       return menuLines(f, ui)
     case 'confirm':
-      return confirmLines(ui)
+      return confirmLines(ui, f.trading?.dry_run === true)
     case 'sending':
       return sendingLines(ui)
     case 'result':
@@ -227,9 +236,9 @@ export function renderHud({ frame, link, now, frameAgeMs }: HudInput): string {
   } else {
     body.push(...linkLines(link))
   }
-  const watch = link.kind === 'open' && frame?.watch === true
-  const footer = link.kind !== 'open' ? FOOTERS.link : watch && mode === 'hud' ? FOOTERS.watch : FOOTERS[mode]
-  const lines = [headerLine(now, watch ? 'WATCH' : ''), ...body.slice(0, BODY_LINES), SEPARATOR, footer]
+  const tag = headerTag(frame, link)
+  const footer = link.kind !== 'open' ? FOOTERS.link : tag === 'WATCH' && mode === 'hud' ? FOOTERS.watch : FOOTERS[mode]
+  const lines = [headerLine(now, tag), ...body.slice(0, BODY_LINES), SEPARATOR, footer]
   return lines.map(fit).join('\n')
 }
 
