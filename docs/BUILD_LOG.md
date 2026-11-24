@@ -843,3 +843,68 @@ call is preceded by `assert_testnet`.
 
 Test settings now pass `dry_run=False` by default, so app tests never load metadata over the
 network. Plugin: 30 tests.
+
+### 17. Move stop-loss: "SL to breakeven" and "SL tighter 1%" (item 3)
+
+**Flow (`actions.py`, rewritten to be generic):**
+- Menus have a `kind` (`MENUS`). The **actions** menu is now Close 25% / 50% / 100% /
+  **Move SL...** / Back.
+- **Move SL...** opens the **sl** submenu: SL to breakeven / SL tighter 1% / Back.
+- An armed order is any `Order` (`Armed.order`) plus a `view` dict for the confirm screen, so
+  closes, stop moves and (in §19) opening drafts all share the one two-tap confirm.
+- "Back" in the submenu returns to its parent menu. Swiping on the confirm screen cancels back to
+  the menu it was armed from, and a double tap returns to the HUD.
+
+**The current stop-loss is fetched from the exchange when the submenu opens:**
+- `Outcome.fetch_stop` triggers `ws.load_stop()` → `adapter.current_stop(coin)` →
+  `flow.set_stop()`, and the screen shows `SL now 3,300  entry 3,412  mark 3,494`.
+- Until it arrives the screen says `SL now loading...`, and picking an item answers "loading the
+  current stop-loss - tap again".
+- If the lookup fails, the submenu stays "not loaded" with a note. It never pretends there is no
+  stop.
+
+**Maths (then validated by the policy guard at arm time and again at send):**
+- **SL to breakeven:** new trigger = entry price.
+- **SL tighter 1%:** new trigger = current SL moved 1 % *of mark* toward the price (long:
+  `sl + 0.01 × mark`, short: `sl − 0.01 × mark`). With no current SL it's refused ("No stop-loss
+  to tighten - use SL to breakeven").
+- The trigger is rounded with `round_px` (Hyperliquid tick rules) when szDecimals is known.
+
+Cases the guard catches, with the reason shown in place of a confirm screen:
+- Breakeven on a **losing** long: the entry is above the mark, so it would fire at once →
+  `Blocked: SL 1,700 is above mark 1,650 - it would fire at once`.
+- Breakeven when the stop is already past entry → `not tighter ... loosening is refused`.
+- Tighten 1 % past the mark → `sl_would_trigger`.
+
+**Sending:**
+- `StopOrder` goes through `OrderService.submit` → `adapter.set_sl`. The new stop is placed
+  first and the old one cancelled afterwards (§15).
+- On the fake exchange the result is `SL set at 3412; old SL cancelled`. In dry run it's
+  `DRY RUN: SL 3412 signed + cancel of old SL, not sent`.
+
+**Protocol and audit:**
+- Confirm screens carry `action` (`close` / `stop`). Stop screens show `old_sl`, `new_sl`,
+  `mark`, `entry`, `size`. The SL menu carries `kind: "sl"`, `sl_loaded` and `current_sl`.
+- The `order` frame has `kind`; `fraction` is null for stop moves.
+- `order_log` has a new `kind` column. `Store.init()` migrates Day-2 databases with
+  `ALTER TABLE ... ADD COLUMN kind ... DEFAULT 'close'` (tested on a Day-2 schema).
+
+**Plugin:**
+- `MOVE SL  ETH-PERP LONG 0.50` + `SL now ...` + items.
+- Confirm: `SL 3,300 -> 3,412  reduce-only` / `new SL placed first, then old cancelled` /
+  `mark 3,494.4  entry 3,412`.
+- `OrderScreen` is a union (`CloseScreen | StopScreen`); a missing `action` means a close (v2.0
+  frames).
+
+**Checks:**
+- **181 backend tests pass** (+11, new `test_stop_loss.py`):
+  - The submenu waits for the stop.
+  - Breakeven long in profit → the exact `StopOrder`.
+  - Breakeven while losing → blocked with the reason.
+  - Tighten long (1600 → 1617.5) and short (1900 → 1882.5).
+  - Tighten without a stop / past the mark; loosening blocked.
+  - Back / cancel navigation; a side flip between taps blocks the send.
+  - **SL to breakeven end to end through `/ws` on the fake exchange** (3300 → 3412, old stop
+    cancelled, `order_log.kind = stop`).
+  - The DB migration.
+- Plugin: 32 tests (+2).

@@ -6,7 +6,14 @@ import dataclasses
 
 import pytest
 
-from tripwire.actions import CONFIRM_WINDOW_S, MENU, MIN_CONFIRM_GAP_S, ActionFlow
+from tripwire.actions import (
+    CLOSE_FRACTIONS,
+    CONFIRM_WINDOW_S,
+    MENU,
+    MENUS,
+    MIN_CONFIRM_GAP_S,
+    ActionFlow,
+)
 from tripwire.hl.positions import Position
 from tripwire.trading import OrderResult
 
@@ -30,9 +37,10 @@ def arm(flow: ActionFlow, cursor: int, now: float = 1.0, decimals: int | None = 
     assert flow.mode == "confirm" and out.timer_s == CONFIRM_WINDOW_S
 
 
-def test_menu_is_reduce_only_closes_plus_back() -> None:
-    assert [m.label for m in MENU] == ["Close 25%", "Close 50%", "Close 100%", "Back"]
-    assert all(m.fraction is None or 0 < m.fraction <= 1 for m in MENU)
+def test_menu_is_reduce_only_closes_sl_moves_and_back() -> None:
+    assert [m.label for m in MENU] == ["Close 25%", "Close 50%", "Close 100%", "Move SL...", "Back"]
+    assert [m.label for m in MENUS["sl"]] == ["SL to breakeven", "SL tighter 1%", "Back"]
+    assert all(0 < f <= 1 for f in CLOSE_FRACTIONS.values())
 
 
 def test_hud_tap_needs_a_position_and_swipes_navigate() -> None:

@@ -52,7 +52,8 @@ link = new BackendLink({
       const where = f.view.count ? `${f.view.index + 1}/${f.view.count}` : 'no positions'
       logLine(`ack ${f.action} -> ${f.mode}, ${where}${f.note ? ` (${f.note})` : ''}`)
     } else if (f.type === 'order') {
-      logLine(`ORDER ${f.coin} close ${Math.round(f.fraction * 100)}%: ${f.status} - ${f.message}`)
+      const pct = f.fraction != null ? ` ${Math.round(f.fraction * 100)}%` : ''
+      logLine(`ORDER ${f.kind ?? 'close'} ${f.coin}${pct}: ${f.status} - ${f.message}`)
     } else if (f.type === 'error') logLine(`backend error: ${f.error}`)
     else if (f.type === 'hello') {
       const mismatch = f.v !== PROTOCOL_VERSION ? ` (plugin speaks v${PROTOCOL_VERSION}!)` : ''

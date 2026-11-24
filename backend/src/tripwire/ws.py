@@ -34,7 +34,7 @@ from tripwire.hud import (
     next_send_delay,
     resolve_index,
 )
-from tripwire.orders import CloseOrder, Order, OrderResult, OrderService
+from tripwire.orders import Order, OrderResult, OrderService
 from tripwire.policy import Decision, PolicyGuard
 from tripwire.state import MarketState
 
@@ -152,7 +152,25 @@ def make_ws_router(
         async with session.send_lock:  # sender task, receiver loop and order task all send
             await ws.send_json(payload)
 
-    async def run_order(ws: WebSocket, session: ClientSession, req: CloseOrder) -> None:
+    async def load_stop(session: ClientSession, coin: str) -> None:
+        """The SL submenu needs the position's current stop-loss (SL to breakeven / tighter)."""
+        try:
+            info = await adapter.current_stop(coin)
+        except Exception as exc:  # leave it "not loaded": never pretend there is no stop
+            log.warning("current stop lookup for %s failed: %s", coin, exc)
+            session.flow.note = f"SL lookup failed: {type(exc).__name__}"[:46]
+            session.wake()
+            return
+        if session.flow.set_stop(coin, info):
+            session.wake()
+
+    def spawn(session: ClientSession, coro: Any, name: str) -> None:
+        task = asyncio.create_task(coro, name=f"{name}-{session.client}")
+        order_tasks.add(task)
+        task.add_done_callback(order_tasks.discard)
+        task.add_done_callback(_log_task_failure)
+
+    async def run_order(ws: WebSocket, session: ClientSession, req: Order) -> None:
         try:
             p = live_position(req.coin)
             result = await orders.submit(  # policy guard, then the exchange
@@ -164,7 +182,9 @@ def make_ws_router(
         out = session.flow.finish(result)
         if out.timer_s is not None and session.connected:
             schedule(session, out.timer_s, out.token)
-        log.info("order %s %s from %s -> %s", req.coin, req.fraction, session.client, result.status)
+        fraction = req.fraction if req.kind == "close" else None
+        size = req.size if req.kind == "close" else None
+        log.info("order %s %s from %s -> %s", req.kind, req.coin, session.client, result.status)
         if store is not None:
             try:
                 await asyncio.to_thread(
@@ -172,8 +192,9 @@ def make_ws_router(
                     client=session.client,
                     coin=req.coin,
                     side=req.side,
-                    fraction=req.fraction,
-                    size=req.size,
+                    kind=req.kind,
+                    fraction=fraction if fraction is not None else 0.0,
+                    size=size,
                     ok=result.ok,
                     status=result.status,
                     filled_size=result.filled_size,
@@ -194,7 +215,8 @@ def make_ws_router(
                         "status": result.status,
                         "message": result.message,
                         "coin": req.coin,
-                        "fraction": req.fraction,
+                        "kind": req.kind,
+                        "fraction": fraction,
                     },
                 )
             session.wake()
@@ -249,12 +271,9 @@ def make_ws_router(
             if out.timer_s is not None:
                 schedule(session, out.timer_s, out.token)
             if out.execute is not None:
-                task = asyncio.create_task(
-                    run_order(ws, session, out.execute), name=f"order-{session.client}"
-                )
-                order_tasks.add(task)
-                task.add_done_callback(order_tasks.discard)
-                task.add_done_callback(_log_task_failure)
+                spawn(session, run_order(ws, session, out.execute), "order")
+            if out.fetch_stop is not None:
+                spawn(session, load_stop(session, out.fetch_stop), "stop-lookup")
             log.info(
                 "intent %s from %s -> mode=%s index=%d/%d%s",
                 intent.action,

@@ -44,7 +44,8 @@ CREATE TABLE IF NOT EXISTS order_log (
     filled_size  REAL,
     avg_px       REAL,
     oid          INTEGER,
-    message      TEXT NOT NULL
+    message      TEXT NOT NULL,
+    kind         TEXT NOT NULL DEFAULT 'close'   -- close / stop / open
 );
 CREATE TABLE IF NOT EXISTS kv (
     key         TEXT PRIMARY KEY,
@@ -65,6 +66,10 @@ class Store:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as conn, conn:
             conn.executescript(SCHEMA)
+            # migration: Day-2 databases have order_log without `kind`
+            cols = {row[1] for row in conn.execute("PRAGMA table_info(order_log)")}
+            if "kind" not in cols:
+                conn.execute("ALTER TABLE order_log ADD COLUMN kind TEXT NOT NULL DEFAULT 'close'")
 
     def upsert_business_connection(
         self,
@@ -120,6 +125,7 @@ class Store:
         fraction: float,
         size: float | None,
         ok: bool,
+        kind: str = "close",
         status: str,
         filled_size: float | None,
         avg_px: float | None,
@@ -130,8 +136,8 @@ class Store:
             conn.execute(
                 """
                 INSERT INTO order_log (ts, client, coin, side, fraction, size, ok, status,
-                                       filled_size, avg_px, oid, message)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                       filled_size, avg_px, oid, message, kind)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     int(time.time() * 1000),
@@ -146,6 +152,7 @@ class Store:
                     avg_px,
                     oid,
                     message,
+                    kind,
                 ),
             )
 

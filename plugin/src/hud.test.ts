@@ -207,6 +207,41 @@ describe('action screens', () => {
     ])
   })
 
+  it('renders the Move SL submenu with the current stop (or that it is loading)', () => {
+    const sl: UiState = {
+      mode: 'menu', kind: 'sl', coin: 'ETH', items: ['SL to breakeven', 'SL tighter 1%', 'Back'],
+      cursor: 0, trading: true, note: null, sl_loaded: true, current_sl: 3300,
+    }
+    expect(at(sl).split('\n').slice(1, 6)).toEqual([
+      'MOVE SL  ETH-PERP LONG 0.50',
+      'SL now 3,300  entry 3,412  mark 3,494',
+      '> SL to breakeven',
+      '  SL tighter 1%',
+      '  Back',
+    ])
+    expect(at({ ...sl, sl_loaded: false })).toContain('SL now loading...')
+    expect(at({ ...sl, current_sl: null })).toContain('SL now none')
+  })
+
+  it('renders the stop-loss confirm screen', () => {
+    const stop: UiState = {
+      mode: 'confirm', action: 'stop', coin: 'ETH', side: 'LONG', label: 'SL to breakeven',
+      old_sl: 3300, new_sl: 3412, mark: 3494.4, entry: 3412, size: 0.5, expires_in_ms: 4100,
+    }
+    expect(at(stop).split('\n')).toEqual([
+      'TRIPWIRE            TESTNET      09:05',
+      'CONFIRM  SL to breakeven  ETH-PERP LONG',
+      'SL 3,300 -> 3,412  reduce-only',
+      'new SL placed first, then old cancelled',
+      'mark 3,494.4  entry 3,412',
+      'Tap again within 5s to SEND.',
+      '----------------------------------------',
+      FOOTERS.confirm,
+    ])
+    expect(at({ ...stop, old_sl: null })).toContain('SL none -> 3,412')
+    expect(at({ ...stop, mode: 'sending' })).toContain('SL 3,300 -> 3,412  reduce-only')
+  })
+
   it('DRY RUN and DEMO are shown in the header; dry run confirms say SIGN, not SEND', () => {
     const dry = { trading: { enabled: true, status: 'ready' as const, dry_run: true, exchange: 'hyperliquid' } }
     const text = at(confirm, dry).split('\n')

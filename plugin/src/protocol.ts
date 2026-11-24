@@ -30,43 +30,65 @@ export interface Position {
   leverage_type: string
 }
 
-/** Which screen the backend's ActionFlow is on for this client (actions.py). */
-export type UiState =
-  | { mode: 'hud' }
-  | {
-      mode: 'menu'
-      coin: string
-      items: string[]
-      cursor: number
-      trading: boolean
-      note: string | null
-    }
-  | {
-      mode: 'confirm' | 'sending'
-      coin: string
-      side: Side
-      label: string
-      fraction: number
-      size: number
-      all: boolean
-      exact: boolean
-      est_px: number
-      slippage_pct: number
-      expires_in_ms: number
-    }
-  | {
-      mode: 'result'
-      coin: string | null
-      ok: boolean
-      status: ResultStatus
-      message: string
-      label: string | null
-    }
+export type MenuKind = 'actions' | 'sl'
 
-/** The confirm and sending screens share one shape: the exact order being confirmed / sent. */
-export type OrderScreen = Extract<UiState, { mode: 'confirm' | 'sending' }>
-export type MenuScreen = Extract<UiState, { mode: 'menu' }>
-export type ResultScreen = Extract<UiState, { mode: 'result' }>
+export interface MenuScreen {
+  mode: 'menu'
+  /** actions: Close 25/50/100% + Move SL...; sl: SL to breakeven / tighter 1% */
+  kind?: MenuKind
+  coin: string
+  items: string[]
+  cursor: number
+  trading: boolean
+  note: string | null
+  /** kind "sl": the position's current stop-loss, once the exchange answered */
+  sl_loaded?: boolean
+  current_sl?: number | null
+}
+
+interface OrderScreenBase {
+  mode: 'confirm' | 'sending'
+  coin: string
+  side: Side
+  label: string
+  expires_in_ms: number
+}
+
+/** Reduce-only close (Day 2). `action` was absent in v2.0 frames: treat missing as "close". */
+export interface CloseScreen extends OrderScreenBase {
+  action?: 'close'
+  fraction: number
+  size: number
+  all: boolean
+  exact: boolean
+  est_px: number
+  slippage_pct: number
+}
+
+/** Move the stop-loss: new SL placed first, then the old one cancelled. */
+export interface StopScreen extends OrderScreenBase {
+  action: 'stop'
+  old_sl: number | null
+  new_sl: number
+  mark: number
+  entry: number
+  size: number
+}
+
+/** The confirm and sending screens show the exact order being confirmed / sent. */
+export type OrderScreen = CloseScreen | StopScreen
+
+export interface ResultScreen {
+  mode: 'result'
+  coin: string | null
+  ok: boolean
+  status: ResultStatus
+  message: string
+  label: string | null
+}
+
+/** Which screen the backend's ActionFlow is on for this client (actions.py). */
+export type UiState = { mode: 'hud' } | MenuScreen | OrderScreen | ResultScreen
 
 export interface TradingInfo {
   enabled: boolean
@@ -121,7 +143,10 @@ export interface OrderFrame {
   status: ResultStatus
   message: string
   coin: string
-  fraction: number
+  /** close / stop / open */
+  kind?: string
+  /** close only (0.25 / 0.5 / 1); null for stop-loss moves and opens */
+  fraction: number | null
 }
 
 export interface ErrorFrame {

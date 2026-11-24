@@ -134,15 +134,27 @@ function positionTag(p: Position | null, coin: string | null): string {
   return coin ? `${coin}-PERP  position closed` : 'position closed'
 }
 
+function slInfoLine(f: HudFrame, ui: MenuScreen): string {
+  const now = !ui.sl_loaded ? 'loading...' : ui.current_sl == null ? 'none' : fmtCompact(ui.current_sl)
+  const p = f.position
+  return p ? `SL now ${now}  entry ${fmtCompact(p.entry)}  mark ${fmtCompact(p.mark)}` : `SL now ${now}`
+}
+
 function menuLines(f: HudFrame, ui: MenuScreen): string[] {
-  const lines = [`ACTIONS  ${positionTag(f.position, ui.coin)}  reduce-only`]
+  const tag = positionTag(f.position, ui.coin)
+  const lines = ui.kind === 'sl' ? [`MOVE SL  ${tag}`, slInfoLine(f, ui)] : [`ACTIONS  ${tag}  reduce-only`]
   ui.items.forEach((item, i) => lines.push(`${i === ui.cursor ? '>' : ' '} ${item}`))
   const note = ui.note ?? (ui.trading ? null : 'Trading off: read-only (no agent key)')
   if (note) lines.push(note)
   return lines
 }
 
+/** What will actually be sent, in one line. */
 function orderLine(ui: OrderScreen): string {
+  if (ui.action === 'stop') {
+    const old = ui.old_sl == null ? 'none' : fmtCompact(ui.old_sl)
+    return `SL ${old} -> ${fmtCompact(ui.new_sl)}  reduce-only`
+  }
   const verb = ui.side === 'LONG' ? 'SELL' : 'BUY' // closing a long sells, closing a short buys
   const qty = ui.all ? `ALL ${fmtQty(ui.size)}` : `${ui.exact ? '' : '~'}${fmtQty(ui.size)}`
   return `${verb} ${qty} ${ui.coin}  reduce-only IOC`
@@ -150,10 +162,17 @@ function orderLine(ui: OrderScreen): string {
 
 function confirmLines(ui: OrderScreen, dryRun: boolean): string[] {
   const secs = Math.max(1, Math.ceil(ui.expires_in_ms / 1000))
+  const detail =
+    ui.action === 'stop'
+      ? [
+          ui.old_sl == null ? 'adds a stop for the whole position' : 'new SL placed first, then old cancelled',
+          `mark ${fmtLive(ui.mark)}  entry ${fmtCompact(ui.entry)}`,
+        ]
+      : [`at ~${fmtLive(ui.est_px)} mark, max ${ui.slippage_pct}% slippage`]
   return [
     `CONFIRM  ${ui.label}  ${ui.coin}-PERP ${ui.side}`,
     orderLine(ui),
-    `at ~${fmtLive(ui.est_px)} mark, max ${ui.slippage_pct}% slippage`,
+    ...detail,
     dryRun ? `Tap again within ${secs}s to SIGN (dry run).` : `Tap again within ${secs}s to SEND.`,
   ]
 }
