@@ -248,7 +248,8 @@ def test_status_text_lists_positions_and_upnl(tg_client: tuple[TestClient, FakeA
         lines[1] == "Positions: price only (no account)  |  Trading: DEMO (in-memory fake exchange)"
     )
     assert lines[2] == "Kill switch: off  |  Alerts at 5% liq distance"
-    assert lines[3].startswith("ETH-PERP LONG 0.5 @ 3,412  mark 3,494.4  uPnL +41.20 (+2.4%)")
+    assert lines[3] == "Away mode: ON - no glasses connected, risk alerts come here"
+    assert lines[4].startswith("ETH-PERP LONG 0.5 @ 3,412  mark 3,494.4  uPnL +41.20 (+2.4%)")
     assert lines[-2] == "Total uPnL: +41.20 USD"
     assert lines[-1].startswith("Latency (HL event -> glasses render):")
 

@@ -24,7 +24,7 @@ from tripwire.exchanges.hyperliquid import HyperliquidAdapter
 from tripwire.hl.feed import HyperliquidFeed
 from tripwire.inbox import Inbox, ReplyTarget
 from tripwire.latency import LatencyStats
-from tripwire.orders import OrderService
+from tripwire.orders import Order, OrderResult, OrderService
 from tripwire.policy import Decision, KillSwitch, PolicyGuard, PolicyLimits
 from tripwire.replies import ReplyDrafter
 from tripwire.risk import AlertService, RiskEngine
@@ -80,9 +80,14 @@ def configure_logging(level: str) -> None:
 
 
 def format_status(
-    state: MarketState, adapter: ExchangeAdapter, guard: PolicyGuard, alerts: AlertService
+    state: MarketState,
+    adapter: ExchangeAdapter,
+    guard: PolicyGuard,
+    alerts: AlertService,
+    glasses: int | None = None,
 ) -> str:
-    """The /status reply: mode, trading, policy, alerts, then every position with uPnL."""
+    """The /status reply: mode, trading, policy, alerts (+ Away mode when `glasses` is given),
+    then every position with uPnL."""
     mode = {
         "account": "own account",
         "watch": f"WATCH {state.account_short} (read-only)",
@@ -104,6 +109,20 @@ def format_status(
         f"Positions: {mode}  |  Trading: {trading}",
         f"Kill switch: {kill}  |  Alerts at {alerts.engine.threshold_pct:g}% liq distance",
     ]
+    if glasses is not None:
+        lines.append(
+            "Away mode: ON - no glasses connected, risk alerts come here"
+            if glasses == 0
+            else f"Away mode: off - glasses connected ({glasses})"
+        )
+    if alerts.episodes:
+        lines.append(
+            "Open alerts: "
+            + ", ".join(
+                f"{e.alert.coin} {e.alert.side} {e.alert.liq_dist_pct:.1f}% from liq"
+                for e in alerts.episodes.values()
+            )
+        )
     positions = state.positions
     if not positions:
         lines.append("No open positions.")
@@ -221,7 +240,14 @@ def create_app(
 
     def on_snooze(coin: str, side: str, now: float) -> None:
         alerts.engine.snooze(coin, side, now)
+        alerts.close_episode(coin, side, "snoozed")
         sessions.tracker.record_snooze()
+
+    def on_order_result(order: Order, result: OrderResult) -> None:
+        """A close or stop that really changed the position ends its alert episode. A dry run,
+        a block or a rejection doesn't: the risk is still there."""
+        if order.kind in ("close", "stop") and result.status in ("filled", "placed", "resting"):
+            alerts.close_episode(order.coin, order.side, f"acted on ({order.kind})")
 
     async def post_journal(text: str) -> tuple[bool, str]:
         if settings.journal_chat_id is None:
@@ -255,7 +281,7 @@ def create_app(
     latency = LatencyStats()
 
     def status_text() -> str:
-        return format_status(state, adapter, guard, alerts) + "\n" + latency.line()
+        return format_status(state, adapter, guard, alerts, hub.count) + "\n" + latency.line()
 
     voice = voice_engine or VoiceEngine(
         enabled=settings.voice_enabled,
@@ -337,6 +363,8 @@ def create_app(
             post_journal=post_journal,
             latency=latency,
             glyphs=settings.glyphs,
+            active_alert=alerts.active_alert,
+            on_order_result=on_order_result,
             min_interval_s=min_interval_s,
             heartbeat_s=heartbeat_s,
         )
@@ -370,8 +398,8 @@ def create_app(
             "session": sessions.snapshot().to_ui(),
             "latency": latency.summary(),
             "alerts": {
-                **alerts.engine.status(asyncio.get_running_loop().time()),
-                "last": alerts.last_delivery,
+                **alerts.status(asyncio.get_running_loop().time()),
+                "away_mode": hub.count == 0,  # no glasses connected: alerts go to Telegram
             },
             "telegram": {"status": bot.status, "detail": bot.detail},
             "ws_clients": hub.count,
@@ -383,6 +411,7 @@ def create_app(
     app.state.hub = hub
     app.state.guard = guard
     app.state.alerts = alerts
+    app.state.on_order_result = on_order_result  # Away mode: what ends an alert episode
     app.state.bot_services = bot_services
     app.state.inbox = inbox
     app.state.voice = voice

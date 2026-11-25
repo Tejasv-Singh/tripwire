@@ -40,7 +40,7 @@ and alerts.
  │   policy.py   PolicyGuard: reduce-only free; opens need SL, ≤$250, ≤5x, loss lock, kill  │
  │   exchanges/  ExchangeAdapter: hyperliquid.py (sign → POST /exchange or DRY_RUN log),    │
  │               fake.py (in-memory), bybit_demo.py (stub)                                  │
- │   risk.py     RiskEngine (threshold, hysteresis, snooze) + AlertService (glasses / DM)   │
+ │   risk.py     RiskEngine + AlertService: glasses, or Away-mode DM (1 per episode)       │
  │   drafts.py   forwarded text → OrderDraft (regex, no LLM)                               │
  │   inbox.py    business messages → HUD line (30 chars, memory only)                       │
  │   replies.py  ≤60-char reply drafts: OpenRouter (facts only) → template fallback         │
@@ -160,6 +160,8 @@ exists on the API — see `docs/BUILD_LOG.md` §0/§2.
 | Plugin ↔ backend, closed | `onclose` | reconnect with 1 → 15 s backoff; HUD shows the countdown; push-to-talk is reset (mic off) |
 | Prices quiet | `feed.age_ms` + frame age > 3 s | HUD shows `STALE: prices Ns old` |
 | App backgrounded / foregrounded | `FOREGROUND_EXIT` / `FOREGROUND_ENTER` | mic off on exit; on enter, force a reconnect and re-arm push-to-talk |
+| Alert while nobody wears the glasses (**Away mode**) | `AlertService.deliver`: no glasses client | one Telegram DM per alert episode (a one-line summary + "Open Tripwire on your glasses to act."), never two per position within 10 min. G2 plugins have **no background / push path** (confirmed by the Even team), so this DM is the core alert channel |
+| Glasses (re)connect with an alert still open | `AlertService.active_alert()` on connect (`ws.py`) | the first screen is the ▲ RISK menu of the most urgent open episode, with live numbers; a waiting forwarded draft follows. The episode ends when acted on (a fill or a placed stop on that position), snoozed, or resolved (closed / back above threshold + hysteresis) |
 | Session started before the feed | `positions_loaded` false, or a position without a mid | the session's uPnL baseline waits for both (an existing position's uPnL never counts as session P&L) |
 | Wrong pairing code | close code 4401 | stop retrying, HUD says "Pairing code rejected" |
 | Telegram token missing/invalid | at startup | bot skipped, backend keeps running, `/healthz` says why |

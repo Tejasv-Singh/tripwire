@@ -8,7 +8,9 @@ stop-loss** (to breakeven, or 1 % tighter): every order reduces risk, passes a p
 is sent only after a second, deliberate tap.
 
 When a position gets within 5 % of liquidation, the glasses show a **▲ RISK** screen with those
-actions and a 5-minute snooze. If the glasses are off, the Telegram bot DMs you instead. Forward a
+actions and a 5-minute snooze. In **Away mode** (the glasses aren't connected), the Telegram bot
+DMs you the alert once, with a one-line position summary. When you open Tripwire on the glasses
+again, it lands straight on that RISK screen until you act, snooze, or the danger passes. Forward a
 trade idea like `BTC long 96.5k sl 95k tp 99k` to the bot and it appears on the glasses as a
 draft, checked against hard limits ($250, 5x, stop-loss required, daily loss lock, kill switch).
 Messages in your Telegram Business chats show up as one line on the HUD, and after a fill you can
@@ -50,6 +52,33 @@ tap: SEND  swipe/2x: cancel
 > Hyperliquid yet: that needs funds and an approved agent key. When they arrive,
 > `npm run golive:check` and [docs/GO_LIVE.md](docs/GO_LIVE.md) take it live.
 > Screenshots: [day 2](docs/screenshots/day2/), [day 3](docs/screenshots/day3/).
+
+## Who it's for
+
+**Active perps traders who hold leveraged positions while they are away from their screen**: in
+a meeting, commuting, cooking, at the gym. The position keeps moving, and liquidation is a
+number they can't watch. Tripwire keeps the few numbers that matter in view without a phone:
+- size, uPnL and the distance to liquidation
+- a risk alert that interrupts when that distance gets small
+- the risk-reducing actions (cut, tighten the stop), each one tap and a confirm away
+
+Tripwire doesn't pick trades or tell anyone what to do. It shows numbers you can check, and it
+does only what you confirm.
+
+## Why Telegram + glasses
+
+- **The glasses can't be woken from outside.** Even Realities confirmed to us that plugins have
+  **no background or push path to the G2**: a plugin only runs while it is open on the phone. A
+  risk alert can't reach the glasses unless Tripwire is already open on them.
+- **So Telegram is the always-on half, not a fallback.** In **Away mode** (no glasses
+  connected), every new alert goes to your Telegram as one DM per alert episode: a one-line
+  position summary and "Open Tripwire on your glasses to act." Opening Tripwire then lands
+  straight on the ▲ RISK screen, where voice or a tap arms the fix and a second tap sends it.
+- **Telegram is where traders already are.** Trade ideas get forwarded there, and desks and
+  communities talk there. The same bot also takes forwarded trade ideas (shown on the glasses as
+  drafts), answers `/status` and `/summary`, and posts your session journal.
+- **The glasses are where acting is fastest.** No unlock, no app switching: look, hold to speak
+  or tap, confirm.
 
 ## How it works
 
@@ -168,8 +197,11 @@ the feed, trading, policy, alert and bot status.
     - `POST /demo/business {"name": "@alice", "text": "still in?"}`
     - `POST /demo/voice {"wav_path": "C:/.../close_half.wav"}`: a 16 kHz mono WAV that
       **replaces** the next push-to-talk's audio (for PCs without a virtual mic)
-    - `GET /demo/dms` and `GET /demo/journal`: what was sent to Telegram (the demo backend never
-      polls, so it can run next to the real one; it sends with the real token if one is set)
+    - `GET /demo/dms` and `GET /demo/journal`: what was sent to Telegram. The demo backend never
+      polls, so it can run next to the real one. It **sends with the real token** if one is set;
+      add `--no-telegram` to only record. Don't blank the token with
+      `$env:TELEGRAM_BOT_TOKEN=''`, because in PowerShell that deletes the variable and `.env`
+      wins.
   - WATCH mode: `npm run backend:demo -- --watch 0x...`. In PowerShell, `npm` swallows the
     `--`, so run `uv --directory backend run python scripts/demo.py --watch 0x...` instead.
 
@@ -244,7 +276,8 @@ On the glasses:
    `/healthz` → `telegram.status` is `running`. Send the bot `/start`. The reply includes **your
    numeric user id**. Put it in `.env` as `TELEGRAM_OWNER_ID=...` and restart. Everything below
    is owner-only:
-   - `/status`: positions, uPnL, trading mode, kill switch, alert threshold.
+   - `/status`: positions, uPnL, trading mode, kill switch, alert threshold, Away mode on/off,
+     and any open alerts.
    - `/kill` / `/unkill`: block / allow every order that adds exposure. Closes and tighter stops
      still work. The setting survives restarts; `KILL_SWITCH=true` in `.env` can't be undone from
      Telegram.
@@ -259,7 +292,19 @@ On the glasses:
      policy verdict, and the glasses show `FORWARDED - your instruction, not advice` with Place
      order / Discard (Discard only if blocked). Ambiguous text is refused with the reason
      (`which price is 95k? label it (sl / tp / @entry)`).
-   - **Risk alerts:** with no glasses connected, an alert arrives as a DM.
+   - **Away mode (risk alerts):** while no glasses are connected, an alert arrives as a DM:
+     ```
+     ▲ RISK - Away mode
+     ETH-PERP LONG 0.5 @ 3,412 5x | uPnL -$109.00 | liq 2,980: 3.4% from mark 3,085 (alert at 5%)
+     Open Tripwire on your glasses to act.
+     ```
+     - **One DM per alert episode.** The episode stays open until you act on it (a fill or a new
+       stop on that position; a dry run doesn't count), snooze it, or it resolves (the position
+       closes, or its distance is back above threshold + 1 %).
+     - Never two DMs for the same position within 10 minutes, and a `/threshold` change doesn't
+       re-send.
+     - **Opening Tripwire on the glasses lands on the ▲ RISK screen** of the most urgent open
+       alert, with live numbers. A waiting forwarded draft shows after it.
    - **Journal channel** for session summaries:
      1. Create a channel (or group) of your own.
      2. Add the bot as an **admin**. The bot DMs you the line to paste:
@@ -298,6 +343,8 @@ and never less than Telegram's `retry_after`. Only a rejected token stops it for
 | The glasses show `BLOCKED: ...` on a draft or instead of a confirm | The policy guard refused it, and the reason is the rule. Limits: $250 notional, 5x, a stop-loss on every opening order, the daily loss lock, the kill switch. Stops must be tighter than the current one and on the safe side of mark. |
 | The result says `DRY RUN: ... signed, not sent` | `DRY_RUN=true` (the default). The signed payload is in `backend/data/dry_run_orders.jsonl`. Set `DRY_RUN=false` (with an agent key) to really send. |
 | No risk alert although a position is close to liquidation | Alerts need markPx (positions past the 25th coin fall back to mid and are skipped) and fire once per approach. They re-arm after the distance is back above threshold + 1 %. Check `/healthz → alerts` and `/threshold`. |
+| Only one Away-mode DM although the position kept getting closer | By design: one DM per alert episode, and none for the same position within 10 minutes. The alert stays open, and opening Tripwire on the glasses lands on its RISK screen. `/status` lists `Open alerts:`; `/healthz → alerts` shows `open`, `dms_sent`, `dms_suppressed` and `away_mode`. |
+| Tripwire keeps opening on the RISK screen | An alert is still open: act on it (a fill or a new stop on that position), snooze it, or wait until the distance is back above threshold + 1 %. Backing out with a double tap doesn't end it. A dry run doesn't either, because nothing changed on the exchange. |
 | Menu says `Trading off: read-only (no agent key)` | Set `HL_ACCOUNT_ADDRESS` and either `HL_AGENT_KEY` or `DRY_RUN=true`. Restart the backend after editing `.env`. |
 | Backend won't start: `HL_AGENT_KEY must be empty or a 64-hex-char private key` | The value isn't a private key. Copy the agent's private key (64 hex characters, `0x` optional), not its address. |
 | Result: `User or API Wallet ... does not exist` | The agent wallet isn't authorized for that account on **testnet**, or `HL_ACCOUNT_ADDRESS` is the agent's address instead of the main account's. |
@@ -370,6 +417,17 @@ Tests cover each one (`backend/tests/test_policy.py`, `test_actions.py`, `test_s
   the command label and the audio length, never dictated reply text.
 - **Journal posts** contain numbers only (times, trades, P&L, counts), and only to the channel
   you set.
+
+## API feature requests (for Even Realities)
+
+What would make Tripwire better, in order. Raised with the Even team at the organizers' meeting.
+
+1. **A background alert / push slot for plugins.** Let a plugin's backend wake the glasses with
+   a short, rate-limited notification (one or two lines, plus "open plugin"), even when the
+   plugin isn't open on the phone. Today the only way to reach a trader who isn't wearing an
+   open plugin is another app (Tripwire uses a Telegram DM; see
+   [Why Telegram + glasses](#why-telegram--glasses)). A system-level slot would let the RISK
+   alert reach the lens directly.
 
 ## What existed before Nov 23
 

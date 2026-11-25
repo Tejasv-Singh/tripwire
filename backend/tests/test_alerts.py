@@ -118,8 +118,11 @@ async def test_without_glasses_the_owner_gets_a_dm() -> None:
     svc = service(0, n)
     assert await svc.deliver(ALERT) == "telegram"
     (text,) = n.sent
-    assert text.startswith("▲ RISK  ETH-PERP LONG 0.5")
-    assert "Liquidation 1,420 is 4.2% from mark 1,482 (alert at 5%)" in text
+    assert text.splitlines() == [  # Away mode (Day 4): header, one-line summary, the instruction
+        "▲ RISK - Away mode",
+        "ETH-PERP LONG 0.5 | liq 1,420: 4.2% from mark 1,482 (alert at 5%)",
+        "Open Tripwire on your glasses to act.",
+    ]
     assert svc.last_delivery == {"alert": ALERT.to_dict(), "delivered_to": "telegram"}
 
 

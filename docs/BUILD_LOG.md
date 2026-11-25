@@ -1652,3 +1652,141 @@ runs first in `policy.py`. The storyboard's over-limit message therefore include
 - The user's :8000 backend runs with `--reload`, so it picked up the session fix by itself.
 - Learned: in PowerShell, `npm run backend:demo -- --watch X` loses the `--` (`npm.ps1`), so
   call `uv --directory backend run python scripts/demo.py --watch X` directly (README updated).
+
+The Day-3 commits (`4d319be`…`9756d1e`) were pushed to `origin/main` with the user's OK.
+
+---
+
+## 2026-11-26 · Day 4
+
+### 29. Positioning update from the organizers' meeting
+
+What the user brought back from the meeting:
+- **The Even team confirmed that plugins have NO background or push path to the glasses.** A
+  plugin runs only while it is open, so nothing outside can wake the G2 or put text on it.
+- **Consequence:** the Telegram-DM alert is not a fallback; it is the only way to reach a trader
+  who isn't wearing the glasses with Tripwire open. It becomes a core feature, **"Away mode"**:
+  1. With no glasses client connected, risk alerts go to a Telegram DM with a one-line position
+     summary and the instruction "Open Tripwire on your glasses to act".
+  2. When the plugin reconnects with an unresolved alert, it opens straight on the ▲ RISK
+     screen. The alert persists until it is acted on, snoozed or resolved.
+  3. A dedup / cooldown, so the DM can't spam: one per alert episode.
+  4. Tests for "alert while away → DM once" and "reconnect → RISK screen first".
+- **README:** "Why Telegram + glasses", "Who it's for" and "API feature requests" sections, with
+  #1 being a background alert / push slot for plugins.
+- **`docs/DEMO.md`:** the storyboard must show glasses closed → the DM arrives → open Tripwire →
+  the RISK screen → a voice / tap action → the two-tap confirm.
+
+### 30. Away mode: alert episodes, one DM per episode, RISK screen first on reconnect
+
+**Alert episodes (`risk.py`):** an episode opens on a position's (coin + side) first fire and
+stays open until one of these happens:
+
+| Ends it | How | Where |
+|---|---|---|
+| **acted on** | a close or stop on that position that **really changed something** (`filled` / `placed` / `resting`). A **dry run, a block or a rejection doesn't count**: the risk is still there | `main.on_order_result`, called from `ws.run_order` for every result |
+| **snoozed** | `Snooze 5m` (menu or voice). If the position is still inside after the snooze, the next fire is a new episode | `main.on_snooze` |
+| **resolved** | the position closed, or its distance is back ≥ threshold + hysteresis (the engine re-arms at the same line) | `AlertService._resolve`, on every check |
+
+- **Backing out with a double tap does not end it**, so the next connect shows the RISK screen
+  again.
+- Episodes are in memory only. After a backend restart, an alert still inside fires again as a new
+  episode.
+
+**Away mode delivery (`AlertService.deliver` / `_away_dm`):**
+- **Glasses connected:** the RISK screen, as before (no DM).
+- **No glasses:** a DM, at most **one per episode**. Re-fires inside the same episode (for
+  example `/threshold` re-arming everything) are reported as
+  `telegram (already sent for this alert)`.
+- **Per position, never two DMs within `DM_MIN_GAP_S` = 600 s.** A price wobbling around
+  threshold + hysteresis closes and reopens episodes; the gap keeps that from becoming a DM storm
+  (`telegram suppressed (last DM for ETH LONG 60s ago)`).
+- The session's "alerts fired" now counts **episodes**, not re-fires.
+- **Not done on purpose:** an episode already shown on the glasses doesn't DM when the glasses
+  disconnect. The user saw it, and it will reopen on the RISK screen anyway.
+
+**The DM** (`Alert.text()`; `Alert` gained `entry`, `leverage`, `upnl`, filled by
+`Alert.from_position`):
+```
+▲ RISK - Away mode
+ETH-PERP LONG 0.5 @ 1,650 5x | uPnL +$14.90 | liq 1,420: 15.5% from mark 1,679.8 (alert at 20%)
+Open Tripwire on your glasses to act.
+```
+
+**RISK screen first (`ws.py`, on connect):** `active_alert()` returns the most urgent open
+episode, **rebuilt from the live position**, so the distance is current and not the one from
+when it fired. It goes on screen before the first frame. A forwarded draft that was waiting for a
+client becomes the flow's `pending_draft` and shows once the alert is left.
+
+**Visible state:**
+- `/status` has a new line: `Away mode: ON - no glasses connected, risk alerts come here` (or
+  `off - glasses connected (1)`), plus `Open alerts: ETH LONG 2.3% from liq` while any are open.
+- `/healthz → alerts` gained `open`, `dms_sent`, `dms_suppressed` and `away_mode`.
+- Protocol: `alert` has 3 new optional fields, and there are no new messages
+  (`ws-protocol.md` "Day 4").
+
+**Also fixed (seen in the simulator):** after a spoken "stop to breakeven", the heard line's note
+`loading the current stop-loss` stayed on the confirm screen after the stop had loaded. `load_stop`
+now replaces the note with the outcome of the waiting command: nothing once the confirm is armed,
+or the reason it wasn't. A test was added.
+
+**Tests: 413 backend pass** (+10). New `test_away_mode.py` (9):
+- the DM text
+- **alert while away → DM once** (deeper inside and a `/threshold` re-fire send nothing more)
+- the wobble cooldown, and a real new episode after the gap
+- episode ends (snooze, position gone, a snooze-expiry re-fire = new episode)
+- shown on glasses = no DM; `active_alert` picks the most urgent with live numbers
+- **end to end:** away → 1 DM → `/status` "Away mode: ON" → connect → **the first frame is the
+  RISK menu** with the live distance → Close 50 % via the two-tap confirm → closed → reconnect →
+  HUD
+- snooze ends it, and a waiting draft comes after the alert
+- only a real change ends it (dry run, blocked, rejected and another coin don't)
+
+Also changed: `test_alerts.py` (the DM text), `test_telegram_depth.py` (the `/status` line) and
+`test_voice.py` (+1, the note). Three full runs in a row: all green. Plugin: 52 pass (a type-only
+change in `protocol.ts`).
+
+**Simulator check (2026-11-26, ~01:35 IST; fake-exchange demo backend; screenshots in
+[docs/screenshots/day4/](screenshots/day4/)):**
+1. Glasses closed (`away_mode: true`) → `/demo/threshold 20` → **one DM** (text above) →
+   `/demo/threshold 21` re-fired the open episode → still one DM (`dms_sent 1, dms_suppressed 1`).
+2. Simulator opened → **the first screen is `▲ RISK  ETH-PERP LONG 0.50` / `Liq 1,420  15.6% from
+   mark (<21%)`** with Move SL / Close 50% / Close all / Snooze 5m. These are live numbers: 15.6 %
+   now vs 15.5 % at the fire, and the current 21 % threshold.
+3. Hold, say "stop to breakeven" (a queued TTS WAV replaced the mic audio, as on Day 3) →
+   `MIC "stop to breakeven"` → `CONFIRM  SL to breakeven` / `SL 1,500 -> 1,650  reduce-only` →
+   tap → `PLACED` / `SL set at 1650, old SL cancelled`. The episode closed (`open: []`).
+4. Closed and reopened → the HUD, not the alert.
+
+**Incident:** that one DM **reached the user's real Telegram**.
+- The plan was to record it only, by blanking the token with `$env:TELEGRAM_BOT_TOKEN=''`. In
+  Windows PowerShell, assigning `''` **deletes** an environment variable, so pydantic-settings
+  read the token from `.env`.
+- The dedup held for the rest of the check, so nothing else went out. The user was told.
+- Fix: `scripts/demo.py --no-telegram` records DMs and journal posts and never sends them
+  (README updated). Use it for verification runs.
+
+### 31. Docs: Who it's for, Why Telegram + glasses, API feature requests, DEMO storyboard
+
+- **README:**
+  - The intro now describes Away mode.
+  - New **Who it's for**: active perps traders holding leveraged positions away from their
+    screen.
+  - New **Why Telegram + glasses**: no background path on the platform (confirmed by the Even
+    team), and Telegram is where traders already are.
+  - Telegram section: the Away-mode DM example and the episode rules.
+  - New **API feature requests**: #1 is a background alert / push slot for plugins.
+  - Two troubleshooting rows ("only one DM", "keeps opening on the RISK screen") and the
+    `--no-telegram` note.
+- **`docs/DEMO.md`:**
+  - **0:22–1:05 is now the Away-mode loop**: close Tripwire → `/status` says Away mode ON →
+    `/threshold` → the DM → open Tripwire → **lands on ▲ RISK** → hold "stop to breakeven" →
+    confirm → tap → `PLACED`, with proof in Open Orders.
+  - The old "glasses off" beat at 2:05 became a `/status` shot (Away mode off + latency).
+  - New planned alternatives: the DM doesn't come (check Away mode; the 10-minute cooldown
+    before a retake), and under water → "close half" on the RISK screen.
+  - Checklist: the bot chat open on the phone; no recent alert for the position.
+  - The WATCH fallback now includes the Away-mode loop.
+- **`architecture.md`:** the risk.py row, and two failure-table rows (Away mode, reconnect with
+  an open alert).
+- **`ws-protocol.md`:** a "Day 4: Away mode" section.

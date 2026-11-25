@@ -224,6 +224,24 @@ def test_push_to_talk_arms_then_tap_tap_sends(demo: tuple[TestClient, Any]) -> N
     assert fake.calls[0][0] == "close" and fake.calls[0][1].fraction == 0.5
 
 
+def test_stop_to_breakeven_note_clears_once_the_confirm_is_armed(tmp_path: Path) -> None:
+    """The heard line first says it waits for the stop lookup; once that lands and the confirm is
+    armed, the stale "loading..." note must not stay on the confirm screen (Day 4 simulator)."""
+    for client, _fake in make_client(tmp_path, "Stop to breakeven."):
+        with client.websocket_connect(f"/ws?code={CODE}") as ws:
+            recv(ws, "hud")
+            heard = push_to_talk(ws)
+            assert heard["command"] == "stop to breakeven"
+            assert heard["note"] == "loading the current stop-loss"
+            frame = recv(ws, "hud", mode="confirm")
+            for _ in range(10):  # the note is refreshed right after the lookup armed it
+                if frame["voice"] and frame["voice"]["note"] is None:
+                    break
+                frame = recv(ws, "hud", mode="confirm")
+            assert frame["ui"]["label"] == "SL to breakeven"
+            assert frame["voice"] == {"state": "heard", "text": "Stop to breakeven", "note": None}
+
+
 def test_audio_outside_push_to_talk_is_ignored(demo: tuple[TestClient, Any]) -> None:
     client, fake = demo
     with client.websocket_connect(f"/ws?code={CODE}") as ws:

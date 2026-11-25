@@ -59,6 +59,10 @@ export interface AlertInfo {
   liq_dist_pct: number
   mark: number
   threshold_pct: number
+  /** Day 4 (Away mode DM summary); null/absent from older backends */
+  entry?: number | null
+  leverage?: number | null
+  upnl?: number | null
 }
 
 export interface MenuScreen {

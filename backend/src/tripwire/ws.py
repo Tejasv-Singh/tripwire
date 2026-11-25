@@ -167,6 +167,9 @@ def make_ws_router(
     latency: Any = None,  # latency.LatencyStats
     glyphs: str = "unicode",
     post_journal: Callable[[str], Awaitable[tuple[bool, str]]] | None = None,
+    # Away mode (risk.py): an unresolved alert opens first on connect; order results close it
+    active_alert: Callable[[], Alert | None] | None = None,
+    on_order_result: Callable[[Order, OrderResult], None] | None = None,
     min_interval_s: float = MIN_INTERVAL_S,
     heartbeat_s: float = HEARTBEAT_S,
 ) -> APIRouter:
@@ -242,6 +245,11 @@ def make_ws_router(
             position = selected_position(session)
             out = session.flow.select_key(pending, **flow_ctx(session, position, loop.time()))
             apply_outcome(None, session, out, loop.time())
+            overlay = session.voice_overlay
+            if overlay is not None and overlay.get("state") == "heard":
+                # "loading the current stop-loss" is over: show what the wait led to instead
+                # (nothing once the confirm is armed, or the reason it wasn't)
+                session.voice_overlay = {**overlay, "note": out.note}
             session.wake()
 
     def spawn(session: ClientSession, coro: Any, name: str) -> None:
@@ -309,6 +317,11 @@ def make_ws_router(
         except Exception as exc:  # an executor bug must not leave the screen stuck on "sending"
             log.exception("order task failed")
             result = OrderResult(False, "error", f"{type(exc).__name__}: {exc}"[:120])
+        if on_order_result is not None:
+            try:
+                on_order_result(req, result)  # e.g. an alert acted on -> its episode closes
+            except Exception:
+                log.exception("on_order_result failed")
         out = session.flow.finish(result)
         if out.timer_s is not None and session.connected:
             schedule(session, out.timer_s, out.token)
@@ -589,7 +602,15 @@ def make_ws_router(
         hub.sessions.add(session)
         session_ws[session] = ws
         waiting = hub.take_pending_draft(asyncio.get_running_loop().time())
-        if waiting is not None:
+        alert = active_alert() if active_alert is not None else None
+        if alert is not None:
+            # Away mode: an alert that fired (and was DMed) while nobody wore the glasses is still
+            # unresolved -> open straight on its RISK screen; a waiting draft comes after it
+            session.flow.raise_alert(alert)
+            if waiting is not None:
+                session.flow.pending_draft = waiting
+            log.info("WS client opens on the RISK screen: %s %s", alert.coin, alert.side)
+        elif waiting is not None:
             session.flow.raise_draft(*waiting)
         session.wake()  # first hud frame immediately
         log.info("WS client connected: %s (%d total)", client, hub.count)

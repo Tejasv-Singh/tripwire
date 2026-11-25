@@ -100,6 +100,32 @@ session_pnl, max_drawdown, alerts_fired, alerts_acted, alerts_snoozed, policy_bl
 | `hud.src_ms` | int ms \| null: backend wall clock when the exchange data in this frame arrived (`MarketState.last_change_ms`) |
 | client → server `{"type":"rendered","seq":N,"src_ms":T}` | sent once per new `src_ms`, after `textContainerUpgrade` for that frame's text returned ok. The backend records `now − src_ms` → p50/p95 in `/status` and `/healthz → latency`. A malformed one → `bad_message` |
 
+## Day 4: Away mode (still additive: `v` stays 2)
+
+G2 plugins have no background / push path to the glasses (confirmed by the Even team). An alert
+that fires while no client is connected goes to Telegram instead (one DM per alert episode; see
+`risk.py`).
+
+- **On connect**, if an alert episode is still open (not acted on, snoozed or resolved), the
+  first `hud` frame after `hello` already carries the RISK screen:
+  ```json
+  {"mode": "menu", "kind": "alert", "coin": "ETH",
+   "items": ["Move SL", "Close 50%", "Close all", "Snooze 5m"], "cursor": 0, ...,
+   "alert": {"coin": "ETH", "side": "LONG", "size": 0.5, "liq_px": 2980.0,
+             "liq_dist_pct": 1.32, "mark": 3020.0, "threshold_pct": 5.0,
+             "entry": 3412.0, "leverage": 5.0, "upnl": 41.2}}
+  ```
+  - Its numbers come from the live position at connect time, not from when the alert fired.
+  - With several open episodes, the most urgent one (smallest `liq_dist_pct`) is shown.
+  - A forwarded draft waiting for a client is shown after the alert is left.
+- `alert` gained `entry`, `leverage` and `upnl` (null when unknown). A client that ignores them is
+  unaffected.
+- **No new client messages.** Snoozing (the `Snooze 5m` item, or voice "snooze") or a fill / a
+  placed stop on that position ends the episode on the backend. Backing out with a double tap
+  doesn't, so the next connect shows the RISK screen again.
+- `/healthz → alerts` gained `open` (the episodes), `dms_sent`, `dms_suppressed` and `away_mode`
+  (no glasses connected).
+
 ## Endpoint and auth
 
 ```

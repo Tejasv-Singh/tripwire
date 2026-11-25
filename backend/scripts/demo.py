@@ -3,6 +3,7 @@
     npm run backend:demo                         # FAKE exchange: a fake 0.5 ETH long with a stop,
                                                  #   on LIVE testnet ETH prices
     npm run backend:demo -- --watch 0xabc...     # WATCH a real testnet address (read-only)
+    ... --no-telegram                            # record DMs / journal posts, never send them
 
 Runs on http://127.0.0.1:8010 (point a Vite dev server at it with VITE_BACKEND_URL). It never
 starts Telegram long polling (that would fight the real backend over the same bot token), but it
@@ -101,10 +102,14 @@ def build(args: argparse.Namespace) -> FastAPI:
     app = create_app(
         settings, run_bot=False, make_adapter=make_adapter, audio_override=audio_override
     )
-    token = real.telegram_bot_token.get_secret_value()
+    # --no-telegram: record DMs / journal posts only. (In PowerShell, $env:TELEGRAM_BOT_TOKEN=''
+    # DELETES the variable, so .env's token wins: that is how one real DM slipped out on Day 4.)
+    token = "" if args.no_telegram else real.telegram_bot_token.get_secret_value()
     notifier = DemoNotifier(token, real.telegram_owner_id)
     app.state.alerts.notifier = notifier
     services = app.state.bot_services
+    if args.no_telegram:
+        log.warning("--no-telegram: DMs and journal posts are only recorded, never sent")
     journal: list[dict[str, Any]] = []
 
     async def send_to_chat(chat_id: int, text: str) -> tuple[bool, str]:
@@ -197,6 +202,12 @@ def main() -> None:
     ap.add_argument("--vite-port", type=int, default=5174, help="Vite dev server port (CORS)")
     ap.add_argument(
         "--alert-pct", type=float, default=5.0, help="initial liquidation alert threshold"
+    )
+    ap.add_argument(
+        "--no-telegram",
+        action="store_true",
+        help="never send to Telegram: Away-mode DMs and journal posts are only recorded "
+        "(GET /demo/dms, /demo/journal)",
     )
     args = ap.parse_args()
     uvicorn.run(build(args), host="127.0.0.1", port=args.port, log_level="info")

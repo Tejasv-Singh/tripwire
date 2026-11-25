@@ -9,8 +9,25 @@ mark; a position whose mark is still the mid fallback is skipped):
 Changing the threshold (Telegram /threshold) re-arms everything, so a position already inside the
 new threshold alerts right away.
 
-Delivery (AlertService): glasses connected -> every client switches to the "RISK" screen
-(ActionFlow.raise_alert); nobody connected -> a Telegram DM to TELEGRAM_OWNER_ID.
+Delivery (AlertService):
+  glasses connected   every client switches to the "RISK" screen (ActionFlow.raise_alert)
+  nobody connected    **Away mode**: a Telegram DM to TELEGRAM_OWNER_ID with a one-line position
+                      summary and "Open Tripwire on your glasses to act." Even plugins have no
+                      background / push path to the glasses (confirmed by the Even team), so this
+                      DM is the only way to reach a trader who isn't wearing them: a core feature.
+
+Alert episodes (Day 4): an episode opens when an alert fires for a position (coin + side) and stays
+open until it is
+  acted on   an order on that position really changed something (filled / placed; a dry run
+             doesn't count: nothing changed on the exchange)
+  snoozed    "Snooze 5m" (if it is still inside afterwards, the next fire is a new episode)
+  resolved   the position closed, or its distance is back above threshold + hysteresis
+While it is open:
+  - Away mode sends **one DM per episode**, and never two DMs for the same position within
+    DM_MIN_GAP_S (a price wobbling around threshold + hysteresis can't open-close-open its way
+    into a DM storm). A /threshold change that re-fires an open episode doesn't DM again.
+  - Glasses that connect (or reconnect) open straight to its RISK screen (`active_alert()`),
+    rebuilt from the live position so the numbers are current.
 """
 
 from __future__ import annotations
@@ -29,6 +46,10 @@ log = logging.getLogger(__name__)
 
 THRESHOLD_KEY = "alert_liq_pct"
 TICK_S = 5.0  # re-evaluate at least this often (snooze expiry without a price change)
+DM_MIN_GAP_S = 600.0  # Away mode: never two DMs for the same position within 10 minutes
+AWAY_INSTRUCTION = "Open Tripwire on your glasses to act."
+
+Key = tuple[str, str]  # (coin, side)
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,18 +61,66 @@ class Alert:
     liq_dist_pct: float
     mark: float
     threshold_pct: float
+    # for the Away-mode DM's one-line position summary (None in older callers / tests)
+    entry: float | None = None
+    leverage: float | None = None
+    upnl: float | None = None
+
+    @classmethod
+    def from_position(cls, p: Position, threshold_pct: float) -> Alert:
+        assert p.liq_px is not None and p.liq_dist_pct is not None
+        return cls(
+            p.coin, p.side, p.size, p.liq_px, p.liq_dist_pct, p.mark, threshold_pct,
+            entry=p.entry, leverage=p.leverage, upnl=p.upnl,
+        )  # fmt: skip
+
+    @property
+    def key(self) -> Key:
+        return (self.coin, self.side)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
-    def text(self) -> str:
-        """Telegram DM body (Unicode is fine in Telegram, unlike the glasses font)."""
-        return (
-            f"▲ RISK  {self.coin}-PERP {self.side} {self.size:g}\n"
-            f"Liquidation {self.liq_px:,.6g} is {self.liq_dist_pct:.1f}% from mark "
-            f"{self.mark:,.6g} (alert at {self.threshold_pct:g}%).\n"
-            "Glasses not connected - open Tripwire to act (Move SL / Close), or send /status."
+    def summary_line(self) -> str:
+        """One line: ETH-PERP LONG 0.25 @ 1,650 5x | uPnL +$4.25 | liq 1,420: 14.8% from mark
+        1,666.3 (alert at 20%)."""
+        head = f"{self.coin}-PERP {self.side} {self.size:g}"
+        if self.entry is not None:
+            head += f" @ {self.entry:,.6g}"
+        if self.leverage:
+            head += f" {self.leverage:g}x"
+        parts = [head]
+        if self.upnl is not None:
+            parts.append(f"uPnL {'-' if self.upnl < 0 else '+'}${abs(self.upnl):,.2f}")
+        parts.append(
+            f"liq {self.liq_px:,.6g}: {self.liq_dist_pct:.1f}% from mark {self.mark:,.6g} "
+            f"(alert at {self.threshold_pct:g}%)"
         )
+        return " | ".join(parts)
+
+    def text(self) -> str:
+        """Away-mode Telegram DM (Unicode is fine in Telegram, unlike the glasses font)."""
+        return f"▲ RISK - Away mode\n{self.summary_line()}\n{AWAY_INSTRUCTION}"
+
+
+@dataclass(slots=True)
+class Episode:
+    """One alert episode for a position: open from the first fire until acted on / snoozed /
+    resolved (see the module docstring)."""
+
+    alert: Alert  # the latest fire's numbers
+    opened: float  # AlertService clock
+    dm_sent: bool = False
+    shown_on_glasses: bool = False
+
+    def status(self, now: float) -> dict[str, Any]:
+        return {
+            "position": f"{self.alert.coin} {self.alert.side}",
+            "liq_dist_pct": round(self.alert.liq_dist_pct, 2),
+            "open_s": int(now - self.opened),
+            "dm_sent": self.dm_sent,
+            "shown_on_glasses": self.shown_on_glasses,
+        }
 
 
 @dataclass(slots=True)
@@ -86,9 +155,7 @@ class RiskEngine:
             if dist <= self.threshold_pct and st.armed and now >= st.snoozed_until:
                 st.armed = False
                 self.fired += 1
-                alerts.append(
-                    Alert(p.coin, p.side, p.size, p.liq_px, dist, p.mark, self.threshold_pct)
-                )
+                alerts.append(Alert.from_position(p, self.threshold_pct))
         for key in set(self._keys) - seen:  # position closed: forget it
             del self._keys[key]
         return alerts
@@ -145,6 +212,11 @@ class AlertService:
         self.store = store
         self._clock = clock
         self.last_delivery: dict[str, Any] | None = None
+        self.episodes: dict[Key, Episode] = {}  # open alert episodes (module docstring)
+        self._last_dm: dict[Key, float] = {}  # Away-mode DM cooldown per position
+        self.positions: list[Position] = []  # as of the last check (fresh numbers for reconnects)
+        self.dms_sent = 0
+        self.dms_suppressed = 0
 
     def now(self) -> float:
         return self._clock() if self._clock else asyncio.get_running_loop().time()
@@ -166,15 +238,20 @@ class AlertService:
         log.info("alert threshold set to %g%% (re-armed)", pct)
 
     async def deliver(self, alert: Alert) -> str:
-        if self.on_fire is not None:
-            self.on_fire(alert)
+        now = self.now()
+        episode = self.episodes.get(alert.key)
+        if episode is None:
+            episode = self.episodes[alert.key] = Episode(alert, now)
+            if self.on_fire is not None:
+                self.on_fire(alert)  # the session counts episodes, not re-fires
+        else:
+            episode.alert = alert  # e.g. /threshold re-armed an episode that is still open
         shown = self.glasses(alert)
         if shown:
+            episode.shown_on_glasses = True
             where = f"glasses ({shown})"
-        elif self.notifier is not None and await self.notifier.send_owner(alert.text()):
-            where = "telegram"
         else:
-            where = "nowhere (no glasses, no Telegram owner)"
+            where = await self._away_dm(episode, now)
         self.last_delivery = {"alert": alert.to_dict(), "delivered_to": where}
         log.warning(
             "RISK alert %s %s liq %.1f%% from mark (threshold %g%%) -> %s",
@@ -186,8 +263,70 @@ class AlertService:
         )
         return where
 
+    async def _away_dm(self, episode: Episode, now: float) -> str:
+        """Away mode: nobody is wearing the glasses. One DM per episode, and per position never
+        two within DM_MIN_GAP_S."""
+        key = episode.alert.key
+        if episode.dm_sent:
+            self.dms_suppressed += 1
+            return "telegram (already sent for this alert)"
+        last = self._last_dm.get(key)
+        if last is not None and now - last < DM_MIN_GAP_S:
+            self.dms_suppressed += 1
+            return f"telegram suppressed (last DM for {key[0]} {key[1]} {int(now - last)}s ago)"
+        if self.notifier is not None and await self.notifier.send_owner(episode.alert.text()):
+            episode.dm_sent = True
+            self._last_dm[key] = now
+            self.dms_sent += 1
+            return "telegram"
+        return "nowhere (no glasses, no Telegram owner)"
+
+    def close_episode(self, coin: str, side: str, why: str) -> bool:
+        """End an open episode (acted on / snoozed / resolved). True if one was open."""
+        episode = self.episodes.pop((coin, side), None)
+        if episode is not None:
+            log.info("alert episode %s %s closed: %s", coin, side, why)
+        return episode is not None
+
+    def _resolve(self, positions: list[Position]) -> None:
+        """Close episodes whose position is gone or back above threshold + hysteresis."""
+        live: dict[Key, Position] = {(p.coin, p.side): p for p in positions}
+        clear = self.engine.threshold_pct + self.engine.hysteresis_pct
+        for key in list(self.episodes):
+            p = live.get(key)
+            if p is None:
+                self.close_episode(*key, why="position closed")
+            elif p.liq_dist_pct is not None and p.liq_dist_pct >= clear:
+                self.close_episode(*key, why=f"recovered ({p.liq_dist_pct:.1f}% >= {clear:g}%)")
+
+    def active_alert(self) -> Alert | None:
+        """The most urgent open episode, with the live position's numbers when available.
+        Glasses that connect open straight to it (ws.py)."""
+        live: dict[Key, Position] = {(p.coin, p.side): p for p in self.positions}
+        best: Alert | None = None
+        for key, episode in self.episodes.items():
+            p = live.get(key)
+            alert = episode.alert
+            if p is not None and p.liq_px is not None and p.liq_dist_pct is not None:
+                alert = Alert.from_position(p, self.engine.threshold_pct)
+            if best is None or alert.liq_dist_pct < best.liq_dist_pct:
+                best = alert
+        return best
+
+    def status(self, now: float | None = None) -> dict[str, Any]:
+        t = self.now() if now is None else now
+        return {
+            **self.engine.status(t),
+            "open": [e.status(t) for e in self.episodes.values()],
+            "dms_sent": self.dms_sent,
+            "dms_suppressed": self.dms_suppressed,
+            "last": self.last_delivery,
+        }
+
     async def check(self, positions: list[Position]) -> list[Alert]:
+        self.positions = positions
         alerts = self.engine.evaluate(positions, self.now())
+        self._resolve(positions)
         for alert in alerts:
             await self.deliver(alert)
         return alerts
