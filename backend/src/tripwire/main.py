@@ -37,6 +37,9 @@ from tripwire.ws import ClientHub, make_ws_router
 log = logging.getLogger("tripwire")
 KNOWN_COINS_MIN = 20  # allMids lists ~200 perps on testnet; fewer means "not loaded yet"
 STATUS_MAX_POSITIONS = 20  # /status lists at most this many (Telegram messages max 4096 chars)
+# summary-screen note when JOURNAL_CHAT_ID is unset: the journal text goes to the backend log
+# instead (the plugin shows notes starting with "DRY RUN" as they are, not as "Not posted: ...")
+JOURNAL_DRY_RUN_NOTE = "DRY RUN - printed to the backend log"
 
 
 _SECRET_PATTERNS = [
@@ -251,7 +254,9 @@ def create_app(
 
     async def post_journal(text: str) -> tuple[bool, str]:
         if settings.journal_chat_id is None:
-            return False, "JOURNAL_CHAT_ID not set in .env"
+            # dry run: nowhere to post, so print exactly what would have been posted
+            log.warning("JOURNAL DRY RUN (JOURNAL_CHAT_ID not set), would post:\n%s", text)
+            return False, JOURNAL_DRY_RUN_NOTE
         return await bot.send_to_chat(settings.journal_chat_id, text)
 
     def known_coins() -> set[str] | None:

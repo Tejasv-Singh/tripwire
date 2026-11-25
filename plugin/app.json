@@ -17,7 +17,7 @@
     },
     {
       "name": "g2-microphone",
-      "desc": "Reserved for upcoming voice commands; not used yet."
+      "desc": "Push-to-talk voice commands: the mic is on only while you hold the temple. Audio goes to your own Tripwire backend, is transcribed locally, and is never stored."
     }
   ],
   "supported_languages": ["en"]

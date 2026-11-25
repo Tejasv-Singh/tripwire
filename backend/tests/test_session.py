@@ -309,8 +309,13 @@ def test_trade_then_end_session_then_post(
     assert client.get("/healthz").json()["session"]["trades"] == 0  # a fresh session runs now
 
 
-def test_post_without_journal_says_why(tmp_path: Path) -> None:
+def test_post_without_journal_is_a_dry_run_print(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No JOURNAL_CHAT_ID: nothing is sent; the exact journal text is printed to the backend log
+    and the summary screen says DRY RUN (Day 5)."""
     app = create_app(settings(tmp_path), run_feed=False, run_bot=False, heartbeat_s=0.2)
+    caplog.set_level("WARNING", logger="tripwire")
     with TestClient(app) as client, client.websocket_connect(f"/ws?code={CODE}") as ws:
         ws.send_json({"type": "intent", "action": "back"})
         recv(ws, "ack")
@@ -321,4 +326,7 @@ def test_post_without_journal_says_why(tmp_path: Path) -> None:
             ui = recv(ws, "hud", mode="summary")["ui"]
             if ui["posted"] is not None:
                 break
-        assert ui["posted"] is False and ui["note"] == "JOURNAL_CHAT_ID not set in .env"
+        assert ui["posted"] is False and ui["note"] == "DRY RUN - printed to the backend log"
+    printed = [r.getMessage() for r in caplog.records if "JOURNAL DRY RUN" in r.getMessage()]
+    assert len(printed) == 1
+    assert "Tripwire session " in printed[0] and printed[0].endswith("Numbers only - not advice.")

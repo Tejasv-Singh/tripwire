@@ -337,7 +337,13 @@ function summaryLines(ui: SummaryScreen): string[] {
   const s = ui.summary
   const trades = `Trades ${s.trades}${s.dry_runs ? ` (+${s.dry_runs} dry)` : ''}`
   const last =
-    ui.posted === true ? 'Posted to journal' : ui.posted === false ? `Not posted: ${ui.note ?? ''}` : s.mode
+    ui.posted === true
+      ? 'Posted to journal'
+      : ui.posted === false
+        ? ui.note?.startsWith('DRY RUN') // no JOURNAL_CHAT_ID: printed to the backend log
+          ? ui.note
+          : `Not posted: ${ui.note ?? ''}`
+        : s.mode
   return [
     `SESSION ${sessionSpan(s)}`,
     `${trades}  Realized ${fmtUsd(s.realized)}`,

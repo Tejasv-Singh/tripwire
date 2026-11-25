@@ -4,6 +4,7 @@
                                                  #   on LIVE testnet ETH prices
     npm run backend:demo -- --watch 0xabc...     # WATCH a real testnet address (read-only)
     ... --no-telegram                            # record DMs / journal posts, never send them
+    ... --no-journal                             # as if JOURNAL_CHAT_ID were unset (dry-run print)
 
 Runs on http://127.0.0.1:8010 (point a Vite dev server at it with VITE_BACKEND_URL). It never
 starts Telegram long polling (that would fight the real backend over the same bot token), but it
@@ -84,6 +85,8 @@ def build(args: argparse.Namespace) -> FastAPI:
     }
     if args.watch:
         overrides.update(watch_address=args.watch, hl_account_address="")
+    if args.no_journal:  # as if JOURNAL_CHAT_ID were unset: the summary is a dry-run print
+        overrides["journal_chat_id"] = None
     settings = Settings(**{**real.model_dump(), **overrides})  # validated (model_copy is not)
     make_adapter = None
     if not args.watch:
@@ -208,6 +211,11 @@ def main() -> None:
         action="store_true",
         help="never send to Telegram: Away-mode DMs and journal posts are only recorded "
         "(GET /demo/dms, /demo/journal)",
+    )
+    ap.add_argument(
+        "--no-journal",
+        action="store_true",
+        help="ignore JOURNAL_CHAT_ID: posting the session summary is a dry-run print to the log",
     )
     args = ap.parse_args()
     uvicorn.run(build(args), host="127.0.0.1", port=args.port, log_level="info")

@@ -50,12 +50,32 @@ async def collect_traders(coins: list[str], seconds: float) -> dict[str, int]:
     return seen
 
 
+HTTP_TIMEOUT_S = 20.0  # testnet /info is sometimes slow; one 10 s timeout killed a fresh-clone run
+RETRIES = 2
+
+
+async def post_info(client: httpx.AsyncClient, body: dict[str, Any]) -> Any:
+    """POST /info with a retry; raises httpx.HTTPError if every attempt failed."""
+    for attempt in range(RETRIES):
+        try:
+            resp = await client.post("/info", json=body)
+            resp.raise_for_status()
+            return resp.json()
+        except httpx.HTTPError:
+            if attempt == RETRIES - 1:
+                raise
+            await asyncio.sleep(1.0)
+    raise AssertionError("unreachable")
+
+
 async def describe(
     client: httpx.AsyncClient, address: str, mids: dict[str, float]
 ) -> dict[str, Any] | None:
-    state = (
-        await client.post("/info", json={"type": "clearinghouseState", "user": address})
-    ).json()
+    try:
+        state = await post_info(client, {"type": "clearinghouseState", "user": address})
+    except httpx.HTTPError as exc:  # one slow address must not end the whole search
+        print(f"  (skipped {address[:10]}...: {type(exc).__name__})")
+        return None
     positions = normalize_positions(state.get("assetPositions", []), mids, {})
     if not positions:
         return None
@@ -83,8 +103,14 @@ async def main() -> None:
     traders = await collect_traders(coins, args.seconds)
     print(f"{len(traders)} distinct traders seen. Checking who holds open positions ...\n")
 
-    async with httpx.AsyncClient(base_url=TESTNET_API_URL, timeout=10) as client:
-        raw_mids = (await client.post("/info", json={"type": "allMids"})).json()
+    async with httpx.AsyncClient(base_url=TESTNET_API_URL, timeout=HTTP_TIMEOUT_S) as client:
+        try:
+            raw_mids = await post_info(client, {"type": "allMids"})
+        except httpx.HTTPError as exc:
+            raise SystemExit(
+                f"Hyperliquid testnet didn't answer ({type(exc).__name__}). It is sometimes "
+                "slow: run `npm run watch:find` again in a minute."
+            ) from None
         mids = {k: v for k, raw in raw_mids.items() if (v := to_float(raw)) is not None}
         found = []
         for address, _n in sorted(traders.items(), key=lambda kv: -kv[1]):

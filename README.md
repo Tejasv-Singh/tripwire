@@ -45,13 +45,14 @@ Tap again within 5s to SEND.
 tap: SEND  swipe/2x: cancel
 ```
 
-> **Status: Day 3 complete; testnet funds pending.** Everything below runs and is tested end to
+> **Status: Day 5, build locked; testnet funds pending.** Everything below runs and is tested end to
 > end in the simulator. The real-data parts are WATCH mode (any public testnet address) and
 > DRY_RUN (really signed testnet orders that are never sent). The order and stop-loss flows are
 > also shown on an in-memory fake exchange (`npm run backend:demo`). No order has been sent to
 > Hyperliquid yet: that needs funds and an approved agent key. When they arrive,
 > `npm run golive:check` and [docs/GO_LIVE.md](docs/GO_LIVE.md) take it live.
-> Screenshots: [day 2](docs/screenshots/day2/), [day 3](docs/screenshots/day3/).
+> Screenshots: [day 2](docs/screenshots/day2/), [day 3](docs/screenshots/day3/),
+> [day 4](docs/screenshots/day4/), [day 5](docs/screenshots/day5/).
 
 ## Who it's for
 
@@ -111,12 +112,65 @@ G2 glasses ◄─BLE─► Even App (phone) running plugin/ ──wss/https─�
   - [GO_LIVE](docs/GO_LIVE.md): the first live testnet orders, step by step
   - [DEMO](docs/DEMO.md): the 3-minute video storyboard and pre-recording checklist
   - [FALLBACK_BYBIT](docs/FALLBACK_BYBIT.md): a plan only, for switching exchanges in under 2 h
+  - [SUBMISSION](docs/SUBMISSION.md): hackathon submission drafts and API feature requests
 
 ## Setup
 
-You need **Node.js 20+** (22 recommended), **[uv](https://docs.astral.sh/uv/)**, **Python 3.12**
-(uv can fetch it), **ngrok** with a free account, and the **Even App** on your phone (2.2.10+)
-if you want to use real glasses.
+You need **Node.js 20+** (22 recommended), **[uv](https://docs.astral.sh/uv/)** (it fetches
+Python 3.12 for you) and **git**. For real glasses you also need **ngrok** with a free account
+and the **Even App** on your phone (2.2.10+).
+
+### Quick start: simulator + WATCH mode (Windows / PowerShell, about 10 minutes)
+
+No exchange account, no ngrok and no glasses needed. This follows a real Hyperliquid testnet
+trader read-only. **Measured on a fresh clone: 7 min 36 s from `git clone` to the live HUD**
+(BUILD_LOG §33).
+
+1. **Clone and install** (about 1 minute):
+   ```powershell
+   git clone https://github.com/Tejasv-Singh/tripwire.git
+   cd tripwire
+   npm run setup
+   ```
+   npm then reports "6 vulnerabilities". They are all in dev tooling (vitest, vite / esbuild);
+   `npm --prefix plugin audit --omit=dev` finds 0 in what ships.
+2. **Optional: a Telegram bot token** (2 minutes): in Telegram, @BotFather → `/newbot` → copy the
+   token. See [Telegram bot](#telegram-bot-optional). Without one, everything except Telegram
+   works.
+3. **Make the two config files, a pairing code, and find an address to watch:**
+   ```powershell
+   Copy-Item .env.example .env
+   Copy-Item plugin\.env.example plugin\.env.local
+   uv --directory backend run python -c "import secrets; print(secrets.token_urlsafe(12))"
+   npm run watch:find
+   ```
+   `watch:find` listens to testnet trades for 20 s and then lists addresses with open positions.
+   Pick one that shows a `liq` price, so alerts can fire.
+4. **Edit the two files** (`notepad .env`, `notepad plugin\.env.local`):
+   - `.env`: `PAIRING_CODE=<the code>`, `WATCH_ADDRESS=<an address from the list>`, and
+     optionally `TELEGRAM_BOT_TOKEN=<token>`.
+   - `plugin\.env.local`: `VITE_PAIRING_CODE=<the same code>`.
+     `VITE_BACKEND_URL=http://127.0.0.1:8000` is already the default.
+5. **Run.** Use three terminals in the repo folder, and start them in this order:
+   ```powershell
+   npm run backend:dev
+   ```
+   ```powershell
+   npm run plugin:dev
+   ```
+   ```powershell
+   npm run sim
+   ```
+   Wait for Vite's `ready` line before `npm run sim`, because the simulator doesn't retry.
+   - The glasses show `TRIPWIRE WATCH  TESTNET ●` and the watched position.
+   - `http://127.0.0.1:8000/healthz` shows `hyperliquid.connected: true`, and
+     `telegram.status: running` if you set a token.
+   - On first start, the voice model (~145 MB) downloads in the background in about 30–40 s.
+   - The simulator controls are under step 6 of the full setup below.
+   - Want the order flows without an account? `npm run backend:demo` (see
+     [Try it without an account](#try-it-without-an-account)).
+
+### Full setup (real glasses, tunnel, trading)
 
 1. **Clone and install everything:**
    ```sh
@@ -124,10 +178,11 @@ if you want to use real glasses.
    cd tripwire
    npm run setup          # uv sync (backend) + npm install (plugin)
    ```
-2. **Configure the backend.** Copy `.env.example` to `.env` in the repo root. Each variable has a
-   one-line comment saying where to get it.
+2. **Configure the backend.** Copy `.env.example` to `.env` in the repo root
+   (`Copy-Item .env.example .env`). Each variable has a one-line comment saying where to get it.
    - `PAIRING_CODE` is required. Generate one with
-     `python -c "import secrets; print(secrets.token_urlsafe(12))"`.
+     `uv --directory backend run python -c "import secrets; print(secrets.token_urlsafe(12))"`.
+     A plain `python` may not exist on Windows; uv always has one.
    - `HL_ACCOUNT_ADDRESS` is optional. Leave it empty to see only the ETH price.
    - `WATCH_ADDRESS` is optional. With no account set, it follows any public testnet address
      read-only (`npm run watch:find` lists some).
@@ -146,33 +201,67 @@ if you want to use real glasses.
      (see [Telegram bot](#telegram-bot-optional)).
    - `GLYPHS=unicode` (default) draws `▲ ━ ●`. Set `ascii` if a display shows boxes.
 3. **Configure the plugin.** Copy `plugin/.env.example` to `plugin/.env.local`. Set
-   `VITE_BACKEND_URL` to your HTTPS backend origin, and `VITE_PAIRING_CODE` to the same value as
-   `PAIRING_CODE`. The pairing code is only read in development builds.
-4. **Set up the tunnel once.** Install ngrok with
+   `VITE_PAIRING_CODE` to the same value as `PAIRING_CODE`; it's only read in development builds.
+   `VITE_BACKEND_URL` decides where the plugin connects:
+   - **Simulator** on the same PC: `http://127.0.0.1:8000` (the default).
+   - **Real glasses:** your HTTPS tunnel origin from step 4, e.g.
+     `https://<your-domain>.ngrok-free.app`.
+4. **Real glasses only: set up the tunnel once.** Install ngrok with
    `winget install --id Ngrok.Ngrok --exact --source winget` (or see
    [ngrok.com/download](https://ngrok.com/download)). Then **open a new terminal**, run
    `ngrok update` (winget ships 3.3.1, which predates the `--url` flag), and then
    `ngrok config add-authtoken <your token from dashboard.ngrok.com>`.
-5. **If you use a different backend host**, put both `https://<host>` and `wss://<host>` in the
-   `network.whitelist` of `plugin/app.json`, and update `VITE_BACKEND_URL` and the `tunnel` script
-   in `package.json`.
+5. **Real glasses only: use your own tunnel host.** `npm run tunnel` starts ngrok on the author's
+   reserved domain (`caucus-strategic-endorse.ngrok-free.dev`), which your ngrok account can't
+   use.
+   - Claim your free static domain on dashboard.ngrok.com, and put it in the `tunnel` script in
+     `package.json` (`ngrok http --url=<your-domain> 8000`).
+   - Put both `https://<your-domain>` and `wss://<your-domain>` in the `network.whitelist` of
+     `plugin/app.json`.
+   - Set `VITE_BACKEND_URL=https://<your-domain>` in `plugin/.env.local`.
 6. **Run it.** Use one terminal per command, in this order:
    ```sh
    npm run backend:dev    # 1. backend on http://127.0.0.1:8000 (auto-reload)
-   npm run tunnel         # 2. ngrok http --url=caucus-strategic-endorse.ngrok-free.dev 8000
+   npm run tunnel         # 2. real glasses only: ngrok -> :8000
    npm run plugin:dev     # 3. Vite on http://localhost:5173 (wait for "ready")
    npm run sim            # 4. Even Hub simulator pointed at the Vite server
    ```
-   The simulated glasses show the live ETH mark price. It changes as testnet ETH moves, and the
-   clock in the header keeps ticking.
+   The simulated glasses show the live ETH mark price, or the watched / own position. Prices change
+   as testnet moves, and the clock in the header keeps ticking.
    - In the simulator, swipe for next/prev and click (tap) for the actions menu.
    - Long-press is push-to-talk: the simulator records from your PC's default microphone.
    - Double-click on the HUD opens `End session?`. A second double-click there exits, and
      double-click backs out of any other screen. With the backend unreachable, one double-click
      exits.
 7. **Run on real glasses:** from `plugin/`, run `npx evenhub qr --url http://<your-LAN-IP>:5173`
-   and scan the code with the Even App. The phone must be on the same Wi-Fi. To build an
-   installable package, run `npm run plugin:pack` to produce `plugin/tripwire.ehpk`.
+   and scan the code with the Even App. The phone must be on the same Wi-Fi. To install it
+   without a dev server, build a package (next section).
+
+### Build the installable package (.ehpk)
+
+```powershell
+npm run pack
+```
+
+This type-checks, builds `plugin/dist/` with Vite, and packs it with `evenhub-cli` 0.2.0 into
+**`plugin/tripwire.ehpk`** (~45 KB), checking the manifest. The output ends with `Stamped
+tripwire.ehpk` and `min_app_version 2.2.10 (SDK 0.0.16)`. With `--json` it prints
+`"warnings":[],"ok":true`.
+
+- **The backend URL is baked in at build time** from `VITE_BACKEND_URL` in
+  `plugin/.env.local`. For a package, that must be your **HTTPS tunnel origin**, and both its
+  `https://` and `wss://` forms must be in `app.json`'s `network.whitelist`.
+- The dev pairing code is **not** in production builds. On the phone, you enter it once on the
+  plugin page.
+- `plugin/app.json` holds the manifest:
+  - name `Tripwire`, `package_id` `com.tejasvsingh.tripwire`
+  - permissions: `network` (whitelist: the ngrok origin, https + wss) and `g2-microphone`
+    (push-to-talk)
+  - `min_app_version` 2.2.10, SDK 0.0.16
+- `*.ehpk` is gitignored. Ship it as a GitHub release asset, or with
+  `npx evenhub create tripwire.ehpk` / `npx evenhub upload` after `npx evenhub login` (run from
+  `plugin/`). `npx evenhub pack ... --check` also asks Even's servers whether the package id is
+  free, which needs that login.
 
 **Checks:** `npm test` runs the backend pytest suite and the plugin vitest suite.
 `npm run check` also runs ruff, strict mypy and tsc. `curl http://127.0.0.1:8000/healthz` shows
@@ -356,7 +445,8 @@ and never less than Telegram's `retry_after`. Only a rejected token stops it for
 | Voice: `MIC  voice unavailable` / `VOICE_ENABLED=false` | Voice is off in `.env`, or the model failed to load (see `/healthz → voice.detail`). The first load needs internet once, for the ~145 MB download. |
 | Voice: `MIC "..."` + `not a command` | It heard you but not a command. Say it as listed (`close half`, `stop to breakeven`...). Two commands at once are refused: "one command at a time". |
 | Glasses show boxes instead of `▲ ━ ●` | Set `GLYPHS=ascii` in `.env` and restart. The fallback is `/!\ - *`. |
-| Summary screen says `Not posted: JOURNAL_CHAT_ID not set in .env` (or a Telegram error) | Set `JOURNAL_CHAT_ID`, make the bot an **admin** of that channel, then restart. |
+| Summary screen says `DRY RUN - printed to the backend log` | `JOURNAL_CHAT_ID` isn't set, so the summary was printed to the backend log (`JOURNAL DRY RUN ... would post:`) instead of posted. To post it, set `JOURNAL_CHAT_ID`, make the bot an **admin** of that channel, and restart. |
+| Summary screen says `Not posted: <Telegram error>` | The bot couldn't post to `JOURNAL_CHAT_ID`. Usually it isn't an admin of that channel, or the id is wrong. |
 
 ## Safety rules
 
@@ -428,6 +518,17 @@ What would make Tripwire better, in order. Raised with the Even team at the orga
    open plugin is another app (Tripwire uses a Telegram DM; see
    [Why Telegram + glasses](#why-telegram--glasses)). A system-level slot would let the RISK
    alert reach the lens directly.
+2. **An OS-owned, trusted confirm sheet** for actions that move money or send messages. The OS
+   would draw it and answer it with a gesture the plugin can't fake, so the user doesn't have to
+   trust plugin-drawn text.
+3. **Secure keystore storage** for small secrets (our pairing code currently sits in
+   `setLocalStorage`).
+4. **Dashboard widgets:** three live numbers at a glance, without opening the plugin.
+5. **In-place list updates** (lists can only be rebuilt today) and **`eventSource` on every
+   gesture** (today it's only on system events, and a tap arrives with `eventType: undefined`).
+
+The details, plus the Hyperliquid and Telegram requests we hit while building, are in
+[docs/SUBMISSION.md](docs/SUBMISSION.md#api-feature-requests).
 
 ## What existed before Nov 23
 

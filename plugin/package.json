@@ -11,7 +11,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "pack": "npm run build && evenhub pack app.json dist -o tripwire.ehpk",
+    "pack": "npm run build && evenhub pack app.json dist -o tripwire.ehpk --sdk-ver 0.0.16",
     "simulate": "node node_modules/@evenrealities/evenhub-simulator/bin/index.js http://localhost:5173",
     "simulate:auto": "node node_modules/@evenrealities/evenhub-simulator/bin/index.js http://localhost:5173 --automation-port 9898"
   },

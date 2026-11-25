@@ -407,6 +407,9 @@ describe('action screens', () => {
     expect(posted).toContain('Posted to journal')
     const failed = at({ mode: 'summary', coin: null, summary: done, posted: false, note: 'JOURNAL_CHAT_ID not set in .env' })
     expect(failed).toContain('Not posted: JOURNAL_CHAT_ID not set in .env')
+    const dry = at({ mode: 'summary', coin: null, summary: done, posted: false, note: 'DRY RUN - printed to the backend log' })
+    expect(dry.split('\n')).toContain('DRY RUN - printed to the backend log')
+    expect(dry).not.toContain('Not posted')
     assertFits(failed)
   })
 

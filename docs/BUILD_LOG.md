@@ -1790,3 +1790,130 @@ change in `protocol.ts`).
 - **`architecture.md`:** the risk.py row, and two failure-table rows (Away mode, reconnect with
   an open alert).
 - **`ws-protocol.md`:** a "Day 4: Away mode" section.
+
+The Away-mode commit `f89fadc` was pushed with the user's OK.
+
+---
+
+## 2026-11-26 · Day 5: lock the build
+
+Rules carried over (BUILD_LOG on every change, a commit per milestone, ask before pushing, no
+secrets, testnet only, reduce-only, two-tap, no advice). New rule: **`--no-telegram` for any test
+that shouldn't message the user.**
+
+### 32. Gap check: session summary, journal, golive:check, docs
+
+| Feature | Status | Evidence |
+|---|---|---|
+| Session summary screen | ✅ | simulator 2026-11-26: [02-session-summary.png](screenshots/day5/02-session-summary.png) (Trades 1, Realized +$8.24, Session −$0.57, drawdown, alerts, blocks); `test_session.py` (13 tests) |
+| "End session?" confirm (HUD double tap) | ✅ | [01-end-session-confirm.png](screenshots/day5/01-end-session-confirm.png); `test_double_tap_on_hud_asks_then_tap_ends_then_tap_posts` |
+| `/summary` (owner only) | ✅ | `test_summary_command_is_owner_only`; real Telegram (Day 3, §25) |
+| Posting to `JOURNAL_CHAT_ID` | ✅ | `test_trade_then_end_session_then_post`; **a real channel post** in the Day-3 exit check (§28, `delivered=True`) |
+| **Dry-run print when `JOURNAL_CHAT_ID` is unset** | ✅ **new today** (it used to only say "Not posted") | [03-journal-dry-run-print.png](screenshots/day5/03-journal-dry-run-print.png): `DRY RUN - printed to the backend log`; the backend log has `JOURNAL DRY RUN (JOURNAL_CHAT_ID not set), would post:` and the full journal text; `test_post_without_journal_is_a_dry_run_print` |
+| `npm run golive:check` | ✅ (FAIL only on the key, as expected) | run 2026-11-26 01:52: `1. FAIL Account + agent key in .env`, `2./3. SKIP` (agent, funds: need the address), `4. PASS` guard, `5. PASS` $15 payload (buy 0.0089 ETH IOC limit 1766.6 + stop 1598.4); `test_golive.py` (18) |
+| `docs/GO_LIVE.md` | ✅ | steps 0–8 (§23) |
+| `docs/FALLBACK_BYBIT.md` | ✅ | plan only, 120-minute budget (§27) |
+| Live testnet orders | ⏳ | waits for testnet funds (not a build gap) |
+
+**What changed:**
+- `main.post_journal`: with `JOURNAL_CHAT_ID` unset, it logs the exact text it would post and
+  returns `JOURNAL_DRY_RUN_NOTE` (`DRY RUN - printed to the backend log`).
+- `hud.ts` shows a `DRY RUN...` note as it is, instead of `Not posted: ...`.
+- `scripts/demo.py --no-journal` simulates an unset `JOURNAL_CHAT_ID`.
+- The simulator run used `--no-telegram --no-journal`, so nothing reached Telegram.
+
+### 33. Fresh-clone test: README as a new Windows/PowerShell user
+
+`git clone https://github.com/Tejasv-Singh/tripwire.git` (at `f89fadc`) into a temp folder,
+then the README followed step by step. Configuration: **only a Telegram bot token** (copied
+into the clone's `.env` without being displayed; the clone's env files were deleted
+afterwards). WATCH mode, simulator.
+
+| Time (IST) | Step | Result |
+|---|---|---|
+| 01:52:42 | `git clone` | 3 s |
+| 01:53:32 | `npm run setup` | ✅ 47 s (uv and npm caches warm on this machine; expect a few minutes on a truly new one). npm prints "6 vulnerabilities (3 moderate, 1 high, 2 critical)": **all in dev tooling** (vitest, vite / esbuild, tinypool); `npm audit --omit=dev` finds 0 |
+| 01:53:43 | `Copy-Item .env.example .env` | ✅ (the README gave no command; added) |
+| 01:54:38 | `npm run watch:find` | ❌ **`httpx.ReadTimeout` traceback after 55 s**: one testnet `/info` call took > 10 s and killed the whole search |
+| 01:58:47 | `npm run watch:find` (fixed) | ✅ 35 s, 8 addresses with positions |
+| 01:59:05 | `.env` (`PAIRING_CODE`, `WATCH_ADDRESS`, `TELEGRAM_BOT_TOKEN`), `plugin/.env.local` | ✅ |
+| 01:59:50 | `npm run backend:dev` + `npm run plugin:dev` | ✅ both up in 10 s |
+| 02:00:18 | `npm run sim` | ✅ **`TRIPWIRE WATCH  TESTNET ●` / `BTC-PERP SHORT 0.2862 @ 59,595 10x` / `Liq 64,552 8.2% away`**; `/healthz`: Hyperliquid connected, `telegram: running @tripwire_g2_bot`, latency p50 26 ms |
+| 02:00:30 | voice model | ✅ first download (142 MB) ready about 40 s after the backend start |
+
+**Total: 7 min 36 s from `git clone` to the live HUD**, including ~3 min lost to the
+`watch:find` failure; about 4.5 min without it. Add ~2 min for a new user to create a bot in
+BotFather and a minute or two of typing. **Well under the 15-minute target.** The user's own
+backend was not running, so there was no second poller on the token (409).
+
+**Fixed from the run:**
+1. **`watch:find` timeout.** `/info` now has a 20 s timeout and one retry. A failing address is
+   skipped (`(skipped 0x1234...: ReadTimeout)`) instead of crashing, and a dead API prints a plain
+   "try again in a minute".
+2. **`plugin/.env.example` pointed `VITE_BACKEND_URL` at the author's ngrok domain.** A new user's
+   simulator would have shown "Backend unreachable". The default is now
+   `http://127.0.0.1:8000`, with the tunnel case explained.
+3. **The README told everyone to run `npm run tunnel`.** That's the author's reserved ngrok
+   domain, which nobody else can claim. The new **Quick start (simulator + WATCH, Windows /
+   PowerShell)** needs no ngrok, and the full setup explains using your own domain (`tunnel`
+   script, `app.json` whitelist, `VITE_BACKEND_URL`).
+4. **The pairing-code command used `python`**, which may not exist on Windows. It's now
+   `uv --directory backend run python -c ...`.
+5. The `npm run setup` vulnerability warning is explained in the README (dev-only, 0 in what
+   ships).
+
+### 34. Packaging: tripwire.ehpk
+
+- `npm run pack` (new root script; `plugin:pack` still works) runs
+  `tsc` + `vite build` + `evenhub pack app.json dist -o tripwire.ehpk --sdk-ver 0.0.16`.
+- **Validates:** `{"package_id":"com.tejasvsingh.tripwire","version":"0.1.0","min_app_version":"2.2.10","warnings":[],"ok":true}`
+  (`--json`). Output: `plugin/tripwire.ehpk`, **45,683 bytes**, `EHPK` container.
+- `app.json`:
+  - name `Tripwire`, `package_id` `com.tejasvsingh.tripwire`
+  - `network` whitelist `https://` + `wss://caucus-strategic-endorse.ngrok-free.dev`
+  - `g2-microphone`: the description was **"Reserved for upcoming voice commands; not used yet"**
+    and is now the real push-to-talk use
+- Checked:
+  - The production bundle contains the ngrok origin (from `plugin/.env.local`) and **not** the
+    dev pairing code.
+- `--check` (is the package id free?) and `create` / `upload` need `evenhub login` to the
+  user's Even account, so they were not run.
+- `*.ehpk` stays gitignored: it embeds one person's tunnel URL and changes with every build. A
+  GitHub release asset is the place for it, if the user asks.
+- The README has a "Build the installable package (.ehpk)" section.
+
+### 35. Submission drafts: docs/SUBMISSION.md
+
+- **Short description:** the problem, who it's for, how it works, and safety. The tracks are
+  written as 02 + 01 (Crypto & DeFi, Messaging), **with the numbering marked "confirm before
+  submitting"**: the repo never recorded which is which. It also covers why it fits **Best
+  Telegram integration**, with a feature-by-API table.
+- **API feature requests: Even (5).**
+  - background alert / push slot (confirmed missing by the Even team)
+  - an OS-owned trusted confirm sheet
+  - secure keystore storage
+  - dashboard widgets
+  - in-place list updates plus `eventSource` on every gesture
+  
+  Checked against SDK 0.0.16's `index.d.ts`:
+  - Lists can only be set by create / rebuild; only text and images have upgrade calls.
+  - `eventSource` exists only on `Sys_ItemEvent`.
+  
+  Also smaller ones: a monospace font, the tap-then-long-press OS menu, and a simulator audio
+  input.
+- **API feature requests: Hyperliquid (6).**
+  - `webData2` docs drift
+  - no server timestamp on `activeAssetCtx`
+  - multi-coin mark prices
+  - `positionTpsl` docs
+  - a builder faucet
+  - SDK `WebsocketManager` can't route `clearinghouseState`
+- **API feature requests: Telegram (3).**
+  - Business needs Premium
+  - first-day `getMe` throttling (~18 min)
+  - "Secretary Mode" naming
+- **"What existed before Nov 23":** research notes and a plan only, plus the full OSS table
+  (now including faster-whisper and the Whisper model).
+- The README's API section now lists all five Even requests and links the details.
+
+**Checks:** 413 backend and 52 plugin tests pass; ruff, mypy and tsc are clean.
