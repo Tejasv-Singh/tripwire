@@ -1917,3 +1917,13 @@ backend was not running, so there was no second poller on the token (409).
 - The README's API section now lists all five Even requests and links the details.
 
 **Checks:** 413 backend and 52 plugin tests pass; ruff, mypy and tsc are clean.
+
+### 36. Track numbering confirmed (Day 5 wrap-up)
+
+The user confirmed from the official brief: **Track 01 = Messaging & News**, **Track 02 =
+Crypto & DeFi**. Tripwire enters **Track 02 (main) + Track 01**, plus **Best Telegram
+integration**.
+- `README.md` (intro line) and `docs/SUBMISSION.md` (the tracks line) now use the official
+  numbers and names.
+- The "confirm the track numbers" item was removed from SUBMISSION's checklist.
+- This supersedes the "confirm before submitting" note in §35.

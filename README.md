@@ -22,7 +22,8 @@ still sends it. A **double tap** ends the session and shows a summary (trades, r
 session P&L, max drawdown, alerts, policy blocks), which one more tap posts to your own Telegram
 journal channel. If no update arrives for 3 s, the glasses say **STALE**.
 
-Built for the **Heads Up** hackathon. Tracks: **Crypto & DeFi** and **Messaging**.
+Built for the **Heads Up** hackathon: **Track 02 – Crypto & DeFi** (main) and **Track 01 –
+Messaging & News**, plus **Best Telegram integration**.
 
 ```
 TRIPWIRE            TESTNET ●    09:05

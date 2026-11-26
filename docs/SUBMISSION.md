@@ -3,9 +3,6 @@
 Drafts to paste into the submission form. Numbers and claims come from `docs/BUILD_LOG.md`.
 
 **Before submitting:**
-- [ ] Confirm the track numbers against the official list: this draft enters **Track 02 and
-      Track 01**. In this repo they are called **Crypto & DeFi** and **Messaging**; check which
-      number is which.
 - [ ] Add the demo video link (storyboard: [DEMO.md](DEMO.md)).
 - [ ] Add the repo link (`https://github.com/Tejasv-Singh/tripwire`) and, if wanted, a GitHub
       release with `tripwire.ehpk` (`npm run pack`).
@@ -47,7 +44,8 @@ meeting, commuting, or at the gym.
 - An agent key only, with dry run by default.
 - No advice: it shows numbers you can check and does only what you confirm.
 
-**Tracks:** 02 + 01 (Crypto & DeFi, Messaging). Also entering **Best Telegram integration**.
+**Tracks:** **Track 02 – Crypto & DeFi** (main) and **Track 01 – Messaging & News**. Also
+entering **Best Telegram integration**.
 
 ### Longer version (for a "describe your project" field)
 
