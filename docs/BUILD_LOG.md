@@ -2012,3 +2012,42 @@ Also: `scripts/demo.py`'s DM log line said `RECORDED (no owner id)` when the rea
 
 README: a `demo:reset` paragraph, and the DEMO link text. SUBMISSION's checklist points to the
 shot list.
+
+`9421e9a` was pushed to `origin/main` with the user's OK.
+
+---
+
+## 🧊 FEATURE FREEZE: from 2026-11-26, 18:15 IST (at `9421e9a`)
+
+Declared by the user. From here on, **only** these changes are allowed:
+
+| Allowed | Examples |
+|---|---|
+| **Bug fixes** | something that is broken or wrong in an existing flow, with a test that shows it |
+| **Live-order go-live** | `docs/GO_LIVE.md` steps once the testnet funds arrive, including the one-line `positionTpsl` size change in `set_sl` if step 6 is rejected, and whatever the first live orders show to be wrong |
+| **Doc / submission edits** | README, `docs/*.md`, `SUBMISSION.md`, `DEMO.md`, BUILD_LOG entries, screenshots, the demo video, a GitHub release with `tripwire.ehpk` |
+
+**Not allowed:**
+- new features, screens, commands or settings
+- refactors without a bug behind them
+- dependency upgrades, including the dev-only `npm audit` items (vite 5 → 7 / vitest 2 → 4)
+
+When in doubt, it's out. Every change under the freeze still follows the standing rules:
+- a BUILD_LOG entry that says which allowed category it falls under
+- the tests green
+- a commit per change
+- ask before pushing
+- no secrets
+- testnet only, reduce-only by default, the two-tap confirm, no advice
+
+Frozen state:
+- backend 416 tests, plugin 52
+- `npm run pack` → `tripwire.ehpk`, validated
+- the fresh clone runs in 7 min 36 s
+- docs complete (GO_LIVE, DEMO, FALLBACK_BYBIT, SUBMISSION)
+
+Open items allowed under the freeze:
+1. the live testnet orders (waiting for funds)
+2. the demo video
+3. the submission form
+4. trying it on real G2 glasses, with fixes only if something is broken
