@@ -140,6 +140,18 @@ class ClientHub:
         for session in list(self.sessions):
             session.wake()
 
+    def reset_clients(self) -> int:
+        """npm run demo:reset: every connected client back to the plain HUD, nothing pending.
+        Returns how many clients were reset."""
+        self.pending_draft = None
+        for session in list(self.sessions):
+            session.cancel_timers()
+            session.flow.reset()
+            session.voice_overlay = None
+            session.voice_buf = None
+            session.wake()
+        return len(self.sessions)
+
     def take_pending_draft(self, now: float) -> tuple[OrderDraft, Decision] | None:
         pending, self.pending_draft = self.pending_draft, None
         if pending is None or now - pending[2] > PENDING_DRAFT_S:

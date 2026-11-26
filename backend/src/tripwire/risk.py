@@ -170,6 +170,11 @@ class RiskEngine:
         for st in self._keys.values():
             st.armed = True
 
+    def reset(self) -> None:
+        """Forget every position's armed / snoozed state (npm run demo:reset)."""
+        self._keys.clear()
+        self.fired = 0
+
     def status(self, now: float) -> dict[str, Any]:
         return {
             "threshold_pct": self.threshold_pct,
@@ -280,6 +285,19 @@ class AlertService:
             self.dms_sent += 1
             return "telegram"
         return "nowhere (no glasses, no Telegram owner)"
+
+    def reset(self, threshold_pct: float) -> dict[str, Any]:
+        """Clean slate between demo takes (npm run demo:reset): no open episodes, no DM cooldowns,
+        everything re-armed and unsnoozed, threshold back to `threshold_pct` (the .env value).
+        Positions and the exchange are not touched."""
+        cleared = {"episodes": len(self.episodes), "cooldowns": len(self._last_dm)}
+        self.engine.reset()
+        self.set_threshold(threshold_pct)
+        self.episodes.clear()
+        self._last_dm.clear()
+        self.last_delivery = None
+        self.dms_sent = self.dms_suppressed = 0
+        return {**cleared, "threshold_pct": threshold_pct}
 
     def close_episode(self, coin: str, side: str, why: str) -> bool:
         """End an open episode (acted on / snoozed / resolved). True if one was open."""

@@ -1927,3 +1927,88 @@ integration**.
   numbers and names.
 - The "confirm the track numbers" item was removed from SUBMISSION's checklist.
 - This supersedes the "confirm before submitting" note in §35.
+
+`463e007` and this fix (`cc67a40`) were pushed to `origin/main` with the user's OK.
+
+### 37. DEMO.md: a timed 2:45 shot list
+
+The 3:00 storyboard became a **shot list**: timestamp | on screen (simulator left / Telegram
+right) | voiceover | the action the user performs.
+
+| Time | What happens |
+|---|---|
+| 0:00–0:10 | **The problem in one sentence** |
+| 0:10–0:25 | glance at the HUD |
+| 0:25–0:40 | glasses off → `/status` says `Away mode: ON` |
+| 0:40–0:55 | `/threshold N` → the Away-mode DM |
+| 0:55–1:10 | reopen → lands on ▲ RISK |
+| 1:10–1:30 | hold, "stop to breakeven" → confirm |
+| 1:30–1:40 | tap → `PLACED` |
+| 1:40–2:00 | forwarded $15 idea → draft → two taps → `FILLED` |
+| 2:00–2:10 | $1,000 idea → `BLOCKED` |
+| 2:10–2:25 | End session → journal post |
+| 2:25–2:35 | **the safety line** |
+| 2:35–2:45 | **the pattern line: "glance at your glasses, hear from Telegram when you're away, and act with a two-tap confirm"** |
+
+The rows add up to exactly 165 s.
+
+- **A WATCH variant**, row by row: voice ends in `BLOCKED watch only`, then "snooze" ends the
+  alert; the drafts show the watch-only block.
+- Planned alternatives: under water, no DM, misheard, and the confirm expired. The 5-second
+  confirm window is called out at 1:30.
+- **The checklist covers the requested items:**
+  - the real backend, never `--no-telegram`
+  - ngrok with your own domain
+  - a WATCH address or a live position
+  - a threshold that triggers (N = the liq % rounded up + 2)
+  - the journal channel with the bot as admin
+  - the **OBS scene**: the simulator left, the phone Telegram mirror right, a "Glasses off" card,
+    and the PC mic as the push-to-talk input
+- **Between takes:** `npm run demo:reset`, restart the simulator, and on a live account cancel
+  the placed stop and close the $15 open.
+
+### 38. `npm run demo:reset`: a clean slate between takes
+
+`scripts/demo_reset.py` POSTs `/admin/demo-reset` on the running backend (default `:8000`;
+`--url` for the demo backend).
+
+**It clears in-memory demo state only:**
+- `AlertService.reset`: open episodes, Away-mode DM cooldowns, the DM counters, the engine's
+  armed / snoozed state and its fire count; the threshold goes back to `ALERT_LIQ_PCT` and is
+  persisted.
+- `SessionService.reset`: a fresh session, with the aborted take **not** stored.
+- `ClientHub.reset_clients`: every connected client's flow goes back to the plain HUD (timers
+  cancelled, voice overlay cleared). `ActionFlow.reset` keeps its token counting, so old timers
+  stay stale.
+- A waiting draft, the inbox line and the latency samples.
+
+**It never touches:** `.env` (only read, for the pairing code), exchange positions and orders,
+the kill switch, or the stored session history.
+
+**Guard:**
+- The pairing code is required as `X-Pairing-Code` (401 otherwise).
+- A request carrying `X-Forwarded-For` (which ngrok adds) gets 403. Through the tunnel a request
+  would look local, so "localhost only" alone wouldn't be enough.
+- POST only; CORS allows only GET.
+
+**Backend not running:** everything above starts fresh on the next start anyway. The script only
+resets the saved threshold in SQLite.
+
+**Tests: 416 backend pass** (+3, new `test_demo_reset.py`):
+- the guard (no code, wrong code, via the tunnel, GET)
+- a full take, then a reset clears episodes, cooldowns, threshold (and the saved one), session,
+  latency, and the connected client's screen; the exchange is untouched, and the next take DMs
+  again at once
+- the offline path
+
+**Live smoke** on the demo backend with `--no-telegram`:
+- Before: threshold 20 %, 1 open alert, 1 recorded DM.
+- `uv --directory backend run python scripts/demo_reset.py --url http://127.0.0.1:8010` printed
+  the summary.
+- After: threshold 5 %, `open: []`, `fired 0`, 0 trades.
+
+Also: `scripts/demo.py`'s DM log line said `RECORDED (no owner id)` when the real reason was
+`--no-telegram`. It now names the reason.
+
+README: a `demo:reset` paragraph, and the DEMO link text. SUBMISSION's checklist points to the
+shot list.

@@ -186,6 +186,13 @@ class ActionFlow:
         self.posted: bool | None = None  # None = not tried, True / False = journal result
         self.token = 0  # bumped on every transition; stale timers compare and do nothing
 
+    def reset(self) -> None:
+        """Back to a plain HUD with nothing pending (npm run demo:reset). The token keeps
+        counting, so timers from before the reset stay stale."""
+        token = self.token
+        self.__init__()  # type: ignore[misc]
+        self.token = token + 1
+
     # --- transitions -------------------------------------------------------------------------
     def _go(self, mode: Mode, *, note: str | None = None) -> int:
         if mode == "hud" and self.pending_alert is not None:

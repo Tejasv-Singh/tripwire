@@ -8,12 +8,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import secrets
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from functools import partial
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from tripwire.config import Settings, assert_testnet
@@ -408,6 +409,51 @@ def create_app(
             },
             "telegram": {"status": bot.status, "detail": bot.detail},
             "ws_clients": hub.count,
+        }
+
+    @app.post("/admin/demo-reset")
+    async def demo_reset(request: Request) -> dict[str, Any]:
+        """npm run demo:reset: a clean slate between demo takes. Clears in-memory state only;
+        never touches .env, the exchange (positions / orders), the kill switch or stored
+        session history.
+        Guarded: the pairing code must be sent as X-Pairing-Code, and requests that came
+        through a tunnel (X-Forwarded-For, which ngrok adds) are refused, because via ngrok
+        they would look local."""
+        if "x-forwarded-for" in request.headers:
+            raise HTTPException(403, "demo reset is local only (not through the tunnel)")
+        code = request.headers.get("x-pairing-code", "")
+        expected = settings.pairing_code.get_secret_value()
+        if not secrets.compare_digest(code.encode(), expected.encode()):
+            raise HTTPException(401, "send the pairing code as X-Pairing-Code")
+        alerts_cleared = await asyncio.to_thread(alerts.reset, settings.alert_liq_pct)
+        sessions.reset()
+        clients = hub.reset_clients()
+        inbox.clear()
+        samples = latency.clear()
+        log.warning(
+            "DEMO RESET: %d alert episode(s), %d DM cooldown(s) cleared; threshold %g%%; "
+            "fresh session; %d client(s) back to the HUD",
+            alerts_cleared["episodes"],
+            alerts_cleared["cooldowns"],
+            settings.alert_liq_pct,
+            clients,
+        )
+        return {
+            "ok": True,
+            "reset": {
+                "alerts": alerts_cleared,
+                "session": "a fresh session starts now (the old one is not stored)",
+                "clients_back_to_hud": clients,
+                "pending_draft": "cleared",
+                "inbox": "cleared",
+                "latency_samples": samples,
+            },
+            "untouched": [
+                ".env",
+                "exchange positions and orders",
+                "kill switch",
+                "stored session history",
+            ],
         }
 
     app.state.market = state  # handy for tests / debugging

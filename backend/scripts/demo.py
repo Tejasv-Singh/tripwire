@@ -71,7 +71,8 @@ class DemoNotifier:
             except Exception as exc:
                 log.warning("demo DM failed: %s: %s", type(exc).__name__, exc)
         self.sent.append({"text": text, "delivered_to_telegram": delivered})
-        log.warning("DM %s:\n%s", "SENT" if delivered else "RECORDED (no owner id)", text)
+        why = "--no-telegram or no token" if not self.token else "no owner id or send failed"
+        log.warning("DM %s:\n%s", "SENT" if delivered else f"RECORDED, not sent ({why})", text)
         return True  # counts as delivered for the demo either way
 
 

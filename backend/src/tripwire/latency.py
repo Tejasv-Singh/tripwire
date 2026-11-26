@@ -33,6 +33,12 @@ class LatencyStats:
         self.samples.append(latency)
         return latency
 
+    def clear(self) -> int:
+        """Drop all samples (npm run demo:reset); returns how many there were."""
+        n = len(self.samples)
+        self.samples.clear()
+        return n
+
     @staticmethod
     def _pct(sorted_vals: list[int], q: float) -> int:
         idx = min(len(sorted_vals) - 1, max(0, round(q * (len(sorted_vals) - 1))))

@@ -111,7 +111,8 @@ G2 glasses ◄─BLE─► Even App (phone) running plugin/ ──wss/https─�
   - [architecture](docs/architecture.md) and the [WebSocket protocol](docs/ws-protocol.md)
   - the [build log](docs/BUILD_LOG.md): every decision and deviation, with where each knob lives
   - [GO_LIVE](docs/GO_LIVE.md): the first live testnet orders, step by step
-  - [DEMO](docs/DEMO.md): the 3-minute video storyboard and pre-recording checklist
+  - [DEMO](docs/DEMO.md): the 2:45 video shot list, the pre-recording checklist, and
+    `npm run demo:reset` between takes
   - [FALLBACK_BYBIT](docs/FALLBACK_BYBIT.md): a plan only, for switching exchanges in under 2 h
   - [SUBMISSION](docs/SUBMISSION.md): hackathon submission drafts and API feature requests
 
@@ -267,6 +268,16 @@ tripwire.ehpk` and `min_app_version 2.2.10 (SDK 0.0.16)`. With `--json` it print
 **Checks:** `npm test` runs the backend pytest suite and the plugin vitest suite.
 `npm run check` also runs ruff, strict mypy and tsc. `curl http://127.0.0.1:8000/healthz` shows
 the feed, trading, policy, alert and bot status.
+
+**`npm run demo:reset`** gives you a clean slate between demo takes, with the backend running.
+- It clears open alerts and Away-mode DM cooldowns, re-arms everything, and sets the threshold
+  back to `ALERT_LIQ_PCT`.
+- It starts a fresh session (not stored) and sends the glasses back to the HUD.
+- It never touches `.env`, the exchange or the kill switch.
+- With the backend stopped, it only resets the saved threshold.
+- It uses the pairing code, and refuses requests that come through the tunnel.
+- For the demo backend: `uv --directory backend run python scripts/demo_reset.py --url
+  http://127.0.0.1:8010`.
 
 ### Try it without an account
 

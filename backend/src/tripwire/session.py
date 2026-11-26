@@ -227,6 +227,13 @@ class SessionService:
     def unrealized_now(self) -> float:
         return sum(p.upnl for p in self.state.positions)
 
+    def reset(self) -> None:
+        """Start a fresh session now without storing the current one (npm run demo:reset)."""
+        self.tracker._reset(unrealized=0.0)
+        self._realized_at = 0.0
+        self._baseline_set = False
+        self._take_baseline()
+
     def _take_baseline(self) -> bool:
         """The session counts only the uPnL that changes *during* it, so its baseline is the uPnL
         of the positions open at the start. At startup the feed hasn't delivered them yet

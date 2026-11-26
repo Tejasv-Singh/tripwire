@@ -3,7 +3,7 @@
 Drafts to paste into the submission form. Numbers and claims come from `docs/BUILD_LOG.md`.
 
 **Before submitting:**
-- [ ] Add the demo video link (storyboard: [DEMO.md](DEMO.md)).
+- [ ] Add the demo video link (2:45 shot list: [DEMO.md](DEMO.md)).
 - [ ] Add the repo link (`https://github.com/Tejasv-Singh/tripwire`) and, if wanted, a GitHub
       release with `tripwire.ehpk` (`npm run pack`).
 - [ ] If testnet funds arrived and `GO_LIVE.md` was run, change "no live order yet" below.
