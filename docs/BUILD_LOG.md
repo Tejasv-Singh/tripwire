@@ -2102,3 +2102,33 @@ recommended way, with the site's Generate button as the alternative.
 **Not verified:** that the testnet API page accepts a pasted address instead of Generate. It was
 never tried in this project. If it only offers Generate, use that path (copy the key once).
 `golive:check` check 2 confirms either way.
+
+`a3d02c3` was pushed with the user's OK.
+
+### 40. ✅ `golive:check`: all 5 PASS for the first time *(freeze category: live-order go-live)*
+
+The user set `HL_ACCOUNT_ADDRESS` (the main wallet, `0x3f27...27ab`) and an authorized agent
+key.
+- `.env` had **no `DRY_RUN` line**. The backend default (`dry_run = True`) applied, so it was
+  already in dry run.
+- At the user's request, an explicit `DRY_RUN=true` line was appended. No other line was
+  touched; `.env` is gitignored.
+
+Run on 2026-11-28 ~16:35 IST:
+```
+ 1. PASS  Account + agent key in .env      account 0x3f27...27ab, agent key set (format OK)
+ 2. PASS  Agent authorized for the account 0xe260...EF24 is an agent of 0x3f27...27ab
+ 3. PASS  Testnet USDC > $20               $999.00 (perps $0.00 + spot $999.00) - most is in spot
+ 4. PASS  Testnet URL guard
+ 5. PASS  $15 order signs and validates (DRY RUN)
+          buy 0.009 ETH IOC limit 1736.4 (~$14.88) + stop 1571.1 (limit 1414); signature
+          recovers on testnet (agent key 0xe260...EF24)
+Result: PASS - 0 failed, 0 skipped, 5 passed.  DRY_RUN in .env: true
+```
+
+**Before the first live order:** all $999 is in **spot**, and **perps has $0**. Orders need
+perps margin, so move USDC from spot to perps on the testnet site first (Portfolio / transfer).
+A $100 position at 5x needs ~$20 of margin; moving ~$200 leaves room.
+
+Next: `docs/GO_LIVE.md` step 3 (a dry-run close on the glasses, after restarting the backend so
+it loads the key), then step 4 (`DRY_RUN=false`).
