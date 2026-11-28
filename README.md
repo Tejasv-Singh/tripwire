@@ -314,8 +314,12 @@ withdraw.
 
 1. Open [app.hyperliquid-testnet.xyz](https://app.hyperliquid-testnet.xyz) with your main wallet
    and get testnet USDC from the faucet. Your account must be eligible for it.
-2. On the **API** page, generate an API wallet and **authorize** it. Copy its private key once.
-   It is the agent key, not your main wallet key.
+2. Make an API (agent) wallet and **authorize** it on the testnet **API** page. Its key is the
+   agent key, not your main wallet key.
+   - **Recommended:** `npm run agent:new` creates it locally, writes the key straight into
+     `.env` (`HL_AGENT_KEY`; it is never printed), and prints only the public address. Paste
+     that address on the API page instead of pressing Generate, then Authorize.
+   - Or press **Generate** on the API page and copy the private key once.
 3. In `.env`, set `HL_ACCOUNT_ADDRESS` to your **main** account address (not the agent's) and
    `HL_AGENT_KEY` to the agent's private key. Restart the backend.
    - Run **`npm run golive:check`**. It checks the keys, that the agent is authorized, testnet

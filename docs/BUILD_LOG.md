@@ -2051,3 +2051,54 @@ Open items allowed under the freeze:
 2. the demo video
 3. the submission form
 4. trying it on real G2 glasses, with fixes only if something is broken
+
+`f688883` (this freeze note) was pushed with the user's OK.
+
+---
+
+## 2026-11-28 · go-live prep
+
+### 39. `npm run agent:new`: the agent key is created locally and never shown *(freeze category: live-order go-live)*
+
+**Why:** the user pasted instructions for making the agent wallet locally:
+```
+pip install eth-account hyperliquid-python-sdk
+python -c "... Account.create(); print(a.address); print(a.key.hex())"
+```
+Then put the key in `.env` and clear the terminal. Generating the key locally, so it never
+touches the browser, is a good idea. But as written:
+- **it prints the private key** into the terminal. In the Claude app's Terminal panel, that
+  output is readable by the assistant, which breaks the "no secrets in chat" rule, and "clear
+  the terminal" doesn't always clear the scrollback.
+- **`pip install` isn't needed** (both packages are already in the backend's uv environment),
+  and that environment has no `pip`, so it would install into the global Python.
+
+I didn't run it: creating an access key is the user's call.
+
+**What:** `backend/scripts/new_agent_key.py` (`npm run agent:new`):
+- `eth_account.Account.create()`, then the key is written straight into the repo-root `.env` as
+  `HL_AGENT_KEY`. Every other line and its line ending are untouched; `DRY_RUN` isn't changed.
+- It **prints only the public agent address** and the next steps: paste the address on the
+  testnet API page instead of Generate, then Authorize with the main wallet; set
+  `HL_ACCOUNT_ADDRESS`; `npm run golive:check`.
+- It **refuses to overwrite** a non-empty `HL_AGENT_KEY`. `--force` replaces it, then the old
+  agent should be revoked.
+- No `.env` → it says to copy `.env.example` first.
+
+The key format matches the config's own validator (64 hex characters; eth_account 0.13.7 gives
+them without `0x`).
+
+**Tests: 421 backend pass** (+5, `test_new_agent_key.py`, temp `.env` only):
+- it fills the empty line, keeping CRLF
+- it refuses / forces
+- it appends a missing line
+- `main()` writes a key that `Settings` accepts, its output contains the address and **not the
+  key**, and a second run refuses
+- no `.env` → it says what to do
+
+**Docs:** `GO_LIVE.md` step 1 and the README's trading steps list `npm run agent:new` as the
+recommended way, with the site's Generate button as the alternative.
+
+**Not verified:** that the testnet API page accepts a pasted address instead of Generate. It was
+never tried in this project. If it only offers Generate, use that path (copy the key once).
+`golive:check` check 2 confirms either way.

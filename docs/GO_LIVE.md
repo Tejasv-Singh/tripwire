@@ -18,9 +18,18 @@ Hyperliquid testnet UI** (<https://app.hyperliquid-testnet.xyz>).
 
 1. On the testnet site, connect your **main** wallet. Its address goes in `.env` as
    `HL_ACCOUNT_ADDRESS=0x...`.
-2. **API** page → generate an API wallet → **Authorize**. Copy its **private key** once and put
-   it in `.env` as `HL_AGENT_KEY=...`. This is the agent key: it can trade but can't withdraw.
-   It never goes in chat, git or the plugin.
+2. **The agent (API) wallet.** It can trade but can't withdraw. Its private key never goes in
+   chat, git, a screenshot or the plugin. Two ways to make one:
+   - **Recommended, the key never touches the browser:** run **`npm run agent:new`** in the
+     repo.
+     - It creates the wallet locally, writes the key straight into `.env` as `HL_AGENT_KEY`,
+       and prints **only the agent's public address**.
+     - On the testnet **API** page, put that address in the API wallet address field instead of
+       pressing Generate, then **Authorize** and sign with the main wallet.
+     - It refuses to overwrite an existing `HL_AGENT_KEY` (`--force` replaces it; then revoke
+       the old agent).
+   - **Or in the browser:** API page → **Generate** → **Authorize**. Copy the private key once
+     into `.env` as `HL_AGENT_KEY=...`.
 3. Leave `DRY_RUN=true`. Leave `WATCH_ADDRESS` empty: the own account wins over WATCH anyway.
 
 ## 2. `npm run golive:check`

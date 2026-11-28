@@ -21,6 +21,7 @@
     "tunnel": "ngrok http --url=caucus-strategic-endorse.ngrok-free.dev 8000",
     "watch:find": "uv --directory backend run python scripts/find_active_addresses.py",
     "golive:check": "uv --directory backend run python scripts/golive_check.py",
+    "agent:new": "uv --directory backend run python scripts/new_agent_key.py",
     "demo:reset": "uv --directory backend run python scripts/demo_reset.py",
     "test": "npm run backend:test && npm run plugin:test",
     "check": "npm run backend:check && npm --prefix plugin run typecheck && npm test"
